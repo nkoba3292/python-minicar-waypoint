@@ -1,0 +1,26 @@
+[Unit]
+Description=Autonomous Car Control System
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/autonomous_car
+ExecStart=/usr/bin/python3 /home/pi/autonomous_car/main_control_loop.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# 環境変数
+Environment=PYTHONPATH=/home/pi/autonomous_car
+Environment=PYTHONUNBUFFERED=1
+
+# セキュリティ設定
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

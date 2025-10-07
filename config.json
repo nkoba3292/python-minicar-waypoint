@@ -1,0 +1,78 @@
+{
+  "system": {
+    "loop_delay": 0.05,
+    "safe_dist_front": 5,
+    "safe_dist_side": 7,
+    "use_narrow_passage": true,
+    "debug_mode": true,
+    "speed_scale": 0.33
+  },
+  "waypoints": {
+    "file": "quarify.json",
+    "arrival_threshold": 5.0
+  },
+  "motor": {
+    "default_speed": 50,
+    "narrow_passage_speed": 30,
+    "max_speed": 100,
+    "steer_correction_factor": 2.0
+  },
+  "sensors": {
+    "ultrasonic": {
+      "pins": {
+        "front_trigger": 23,
+        "front_echo": 24,
+        "left_trigger": 17,
+        "left_echo": 27,
+        "right_trigger": 22,
+        "right_echo": 10,
+        "rear_left_trigger": 9,
+        "rear_left_echo": 11,
+        "rear_right_trigger": 5,
+        "rear_right_echo": 6
+      },
+      "max_distance": 300,
+      "timeout": 0.1
+    },
+    "imu": {
+      "type": "BNO055",
+      "i2c_address": "0x28",
+      "bus": 1,
+      "calibration_file": "imu_2point_calib.json",
+      "auto_calibration": true
+    }
+  },
+  "pca9685": {
+    "i2c_address": "0x40",
+    "frequency": 50,
+    "motor_channel": 0,
+    "servo_channel": 1,
+    "motor_min": 1000,
+    "motor_max": 2000,
+    "motor_neutral": 1500,
+    "servo_min": 1000,
+    "servo_max": 2000,
+    "servo_center": 1500
+  },
+  "gpio": {
+    "led_pin": 18,
+    "button_pin": 2
+  },
+  "narrow_passage": {
+    "threshold": 20,
+    "lanes": ["left", "center", "right"],
+    "wall_follow_distance": 10
+  },
+  "platform_specific": {
+    "raspberry_pi": {
+      "use_hardware_pwm": true,
+      "i2c_bus": 1,
+      "spi_bus": 0
+    },
+    "pc_test": {
+      "mock_sensors": true,
+      "simulation_mode": true,
+      "verbose_logging": true
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "timestamp": "2025-09-28T06:32:43.448661",
+  "calibration_method": "custom_2point_user_selection",
+  "setup_points": {
+    "timestamp": "2025-09-28T06:25:48.009943",
+    "method": "custom_2point_selection",
+    "point1": {
+      "x": 98.02830860534124,
+      "y": 76.708059347181,
+      "name": "Calibration Point 1"
+    },
+    "point2": {
+      "x": 91.40563798219583,
+      "y": 79.42505242334322,
+      "name": "Calibration Point 2"
+    },
+    "reference_angle": 157.69379494509244,
+    "distance": 7.158339022328198,
+    "description": "Custom user selection: (98.0,76.7) → (91.4,79.4)",
+    "status": "setup_complete"
+  },
+  "imu_measurement": {
+    "raw_yaw": 59.932320253764885,
+    "measurement_time": "2025-09-28T06:32:43.448661"
+  },
+  "calibration_result": {
+    "reference_angle": 157.69379494509244,
+    "yaw_offset": 97.76147469132755,
+    "description": "Offset to align IMU with user-selected direction"
+  },
+  "usage_instructions": {
+    "vehicle_position": "(98.0, 76.7)",
+    "target_direction": "(91.4, 79.4)",
+    "reference_heading": "157.7°"
+  }
+}

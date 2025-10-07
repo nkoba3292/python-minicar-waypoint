@@ -1,0 +1,30 @@
+{
+  "calibration_type": "vehicle_footprint",
+  "measurement_count": 2,
+  "vehicle_dimensions": {
+    "width_mm": 180.0,
+    "length_mm": 350.0
+  },
+  "measurements": [
+    {
+      "x": -2.95,
+      "y": -0.45,
+      "yaw": 90.0,
+      "measured_yaw": 92.33839266070156,
+      "measurement_time": "2025-09-28T09:28:37.839549"
+    },
+    {
+      "x": 2.3,
+      "y": 4.75,
+      "yaw": 0.0,
+      "measured_yaw": 2.2630899629094356,
+      "measurement_time": "2025-09-28T09:28:44.052181"
+    }
+  ],
+  "validation": {
+    "is_valid": true,
+    "message": "Measurements valid. Max error: 2.3°, Avg: 2.3°"
+  },
+  "created_at": "2025-09-28T09:29:19.509132",
+  "calculated_offset": -2.300741311805497
+}

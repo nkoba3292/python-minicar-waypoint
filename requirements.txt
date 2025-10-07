@@ -1,0 +1,48 @@
+# Raspberry Pi 4B 自律走行システム - Python依存ライブラリ
+
+# 基本数値計算・データ処理・可視化
+numpy>=1.21.0
+scipy>=1.7.0
+matplotlib>=3.5.0
+
+# JSON・設定ファイル処理 (標準ライブラリのため不要)
+# json (built-in)
+# math (built-in)
+# time (built-in)
+# threading (built-in)
+# queue (built-in)
+
+# Raspberry Pi GPIO制御
+RPi.GPIO>=0.7.1
+
+# I2C・センサー通信
+smbus2>=0.4.1
+
+# PWM・サーボ制御 (PCA9685)
+adafruit-circuitpython-pca9685>=3.4.0
+adafruit-circuitpython-motor>=3.4.0
+adafruit-pca9685>=1.0.1
+
+# IMUセンサー（BNO055）
+adafruit-circuitpython-bno055>=5.4.0
+adafruit-circuitpython-register>=1.9.0
+adafruit-bno055>=1.3.2
+
+# 追加の依存関係
+adafruit-circuitpython-busdevice>=5.2.0
+
+# 超音波センサー（HC-SR04等）
+# GPIO経由で制御のため追加ライブラリ不要
+
+# オプション: より高レベルなセンサーライブラリ
+adafruit-circuitpython-bundle>=0.0.0
+
+# シリアル通信（必要に応じて）
+pyserial>=3.5
+
+# ログ・デバッグ（必要に応じて）
+colorlog>=6.6.0
+
+# 開発・テスト用（PC環境のみ）
+# pytest>=7.0.0 (開発時のみ)
+# mock>=4.0.0 (開発時のみ)

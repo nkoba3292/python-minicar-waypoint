@@ -539,6 +539,7 @@ class UltimateIMUMonitor:
 
 def main():
     """メイン実行関数（絶対に失敗しない）"""
+    global USE_MOCK_SENSOR
     try:
         print("🧭 BNO055 Ultimate Debug Tool - Bulletproof Edition")
         print("="*65)
@@ -561,7 +562,6 @@ def main():
         
         if not sensor.connect():
             print("⚠️ Primary connection failed - activating emergency mock mode")
-            global USE_MOCK_SENSOR
             USE_MOCK_SENSOR = True
             sensor = UltimateBNO055Sensor()
             sensor.connect()

@@ -506,9 +506,9 @@ def main():
                 time.sleep(5)
             else:
                 print("❌ All connection attempts failed")
+                global MOCK_MODE
                 if not MOCK_MODE:
                     print("💡 Switching to mock mode for demonstration...")
-                    global MOCK_MODE
                     MOCK_MODE = True
                     sensor = RobustBNO055Sensor()
                     sensor.connect()

@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # 安全なモック設定
-USE_MOCK_SENSOR = True  # 確実に動作するモック使用
+USE_MOCK_SENSOR = False  # 実際のセンサーを優先使用
 
 try:
     import serial
@@ -315,6 +315,9 @@ class UltimateBNO055Sensor:
         self.error_count = 0
         self.last_successful_read = time.time()
         
+        # 複数のポートを試行
+        self.possible_ports = ['/dev/serial0', '/dev/ttyS0', '/dev/ttyAMA0', '/dev/ttyUSB0']
+        
         if USE_MOCK_SENSOR:
             logger.info("Using Advanced Mock Sensor for ultimate reliability")
             self.mock_sensor = AdvancedMockSensor()
@@ -328,23 +331,49 @@ class UltimateBNO055Sensor:
             logger.error("Serial library not available")
             return False
         
+        # 複数のポートを試行
+        for port in self.possible_ports:
+            try:
+                logger.info(f"Attempting connection to {port}")
+                
+                self.serial_conn = serial.Serial(
+                    port=port,
+                    baudrate=self.baudrate,
+                    timeout=SafetyConfig.CONNECTION_TIMEOUT,
+                    write_timeout=SafetyConfig.CONNECTION_TIMEOUT
+                )
+                
+                time.sleep(2)
+                
+                # 接続テスト
+                if self._test_connection():
+                    self.is_connected = True
+                    self.port = port
+                    logger.info(f"Real BNO055 connected successfully on {port}")
+                    return self.initialize_sensor()
+                else:
+                    self.serial_conn.close()
+                    
+            except Exception as e:
+                logger.warning(f"Connection to {port} failed: {e}")
+                if self.serial_conn:
+                    try:
+                        self.serial_conn.close()
+                    except:
+                        pass
+        
+        logger.error("All connection attempts failed")
+        return False
+    
+    def _test_connection(self):
+        """接続テスト"""
         try:
-            logger.info(f"Attempting connection to {self.port}")
-            
-            self.serial_conn = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                timeout=SafetyConfig.CONNECTION_TIMEOUT,
-                write_timeout=SafetyConfig.CONNECTION_TIMEOUT
-            )
-            
-            time.sleep(3)
-            self.is_connected = True
-            logger.info("Real BNO055 connected successfully")
-            return self.initialize_sensor()
-            
-        except Exception as e:
-            logger.error(f"Connection failed: {e}")
+            # BNO055のChip IDを読み取り (0x00レジスタ = 0xA0)
+            self.serial_conn.write(b'\x01\x00\x01')  # Read register 0x00
+            time.sleep(0.1)
+            response = self.serial_conn.read(2)
+            return len(response) >= 1
+        except:
             return False
     
     def initialize_sensor(self):
@@ -354,11 +383,38 @@ class UltimateBNO055Sensor:
         
         try:
             logger.info("Initializing real BNO055 sensor")
-            time.sleep(2)
-            logger.info("Real BNO055 initialization completed")
-            return True
+            
+            # BNO055をコンフィグモードに設定 (0x3D = 0x00)
+            if self._write_register(0x3D, 0x00):
+                time.sleep(0.025)
+                
+                # 動作モードをNDOF(Nine Degrees of Freedom)に設定 (0x3D = 0x0C)
+                if self._write_register(0x3D, 0x0C):
+                    time.sleep(0.01)
+                    logger.info("Real BNO055 initialization completed")
+                    return True
+                    
+            logger.error("BNO055 initialization failed")
+            return False
+            
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
+            return False
+    
+    def _write_register(self, reg, value):
+        """BNO055レジスタ書き込み"""
+        try:
+            # BNO055 UART プロトコル: 0xAA, 0x00, reg, count, value
+            command = bytes([0xAA, 0x00, reg, 0x01, value])
+            self.serial_conn.write(command)
+            time.sleep(0.01)
+            
+            # 応答確認
+            response = self.serial_conn.read(2)
+            return len(response) >= 2 and response[0] == 0xEE and response[1] == 0x01
+            
+        except Exception as e:
+            logger.error(f"Register write error: {e}")
             return False
     
     def update_sensor_data(self):
@@ -389,8 +445,113 @@ class UltimateBNO055Sensor:
         if USE_MOCK_SENSOR:
             return self.mock_sensor.get_sensor_data()
         
-        # 実際のセンサーからのデータまたはフォールバック
+        # 実際のセンサーからデータを読み取り
+        try:
+            data = self._read_real_sensor_data()
+            if data:
+                self.last_successful_read = time.time()
+                self.error_count = 0
+                return self.validator.validate_and_correct(data)
+            else:
+                self.error_count += 1
+                logger.warning(f"Sensor read failed, error count: {self.error_count}")
+        except Exception as e:
+            self.error_count += 1
+            logger.error(f"Sensor data error: {e}")
+        
+        # エラー時はフォールバックデータ
         return self.validator._get_default_data()
+    
+    def _read_real_sensor_data(self):
+        """実際のBNO055センサーからデータ読み取り"""
+        if not self.is_connected or not self.serial_conn:
+            return None
+        
+        try:
+            # BNO055の各データレジスタを読み取り
+            # 加速度データ (0x08-0x0D)
+            accel_data = self._read_registers(0x08, 6)
+            # ジャイロデータ (0x14-0x19)  
+            gyro_data = self._read_registers(0x14, 6)
+            # 磁力計データ (0x0E-0x13)
+            mag_data = self._read_registers(0x0E, 6)
+            # オイラー角データ (0x1A-0x1F)
+            euler_data = self._read_registers(0x1A, 6)
+            # キャリブレーション状態 (0x35)
+            calib_status = self._read_registers(0x35, 1)
+            
+            if all([accel_data, gyro_data, mag_data, euler_data, calib_status]):
+                # データを適切な単位に変換
+                return {
+                    'timestamp': time.time(),
+                    'accelerometer': self._convert_accel(accel_data),
+                    'gyroscope': self._convert_gyro(gyro_data),
+                    'magnetometer': self._convert_mag(mag_data),
+                    'euler': self._convert_euler(euler_data),
+                    'calibration': self._parse_calibration(calib_status[0]),
+                    'temperature': 25.0,  # 簡易実装
+                    'linear_acceleration': [0.0, 0.0, 0.0],
+                    'gravity': [0.0, 0.0, 9.8]
+                }
+                
+        except Exception as e:
+            logger.error(f"Real sensor read error: {e}")
+            
+        return None
+    
+    def _read_registers(self, start_reg, count):
+        """BNO055レジスタ読み取り"""
+        try:
+            # BNO055 UART プロトコル: 0xAA, 0x01, reg, count
+            command = bytes([0xAA, 0x01, start_reg, count])
+            self.serial_conn.write(command)
+            time.sleep(0.01)
+            
+            # レスポンス読み取り
+            response = self.serial_conn.read(2 + count)  # Header + data
+            if len(response) >= count + 2 and response[0] == 0xBB:
+                return list(response[2:])
+            
+        except Exception as e:
+            logger.error(f"Register read error: {e}")
+            
+        return None
+    
+    def _convert_accel(self, data):
+        """加速度データ変換 (m/s²)"""
+        x = int.from_bytes(data[0:2], byteorder='little', signed=True) / 100.0
+        y = int.from_bytes(data[2:4], byteorder='little', signed=True) / 100.0  
+        z = int.from_bytes(data[4:6], byteorder='little', signed=True) / 100.0
+        return [x, y, z]
+    
+    def _convert_gyro(self, data):
+        """ジャイロデータ変換 (rad/s)"""
+        x = int.from_bytes(data[0:2], byteorder='little', signed=True) / 900.0
+        y = int.from_bytes(data[2:4], byteorder='little', signed=True) / 900.0
+        z = int.from_bytes(data[4:6], byteorder='little', signed=True) / 900.0
+        return [x, y, z]
+    
+    def _convert_mag(self, data):
+        """磁力計データ変換 (μT)"""
+        x = int.from_bytes(data[0:2], byteorder='little', signed=True) / 16.0
+        y = int.from_bytes(data[2:4], byteorder='little', signed=True) / 16.0
+        z = int.from_bytes(data[4:6], byteorder='little', signed=True) / 16.0
+        return [x, y, z]
+    
+    def _convert_euler(self, data):
+        """オイラー角データ変換 (度)"""
+        heading = int.from_bytes(data[0:2], byteorder='little', signed=True) / 16.0
+        roll = int.from_bytes(data[2:4], byteorder='little', signed=True) / 16.0
+        pitch = int.from_bytes(data[4:6], byteorder='little', signed=True) / 16.0
+        return [heading, roll, pitch]
+    
+    def _parse_calibration(self, status):
+        """キャリブレーション状態解析"""
+        sys_cal = (status >> 6) & 0x03
+        gyro_cal = (status >> 4) & 0x03
+        accel_cal = (status >> 2) & 0x03
+        mag_cal = status & 0x03
+        return [sys_cal, gyro_cal, accel_cal, mag_cal]
     
     def disconnect(self):
         """安全な切断処理"""

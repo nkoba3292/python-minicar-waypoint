@@ -451,7 +451,7 @@ class UltimateBNO055Sensor:
             if data:
                 self.last_successful_read = time.time()
                 self.error_count = 0
-                return self.validator.validate_and_correct(data)
+                return self.validator.validate_and_fix(data)
             else:
                 self.error_count += 1
                 logger.warning(f"Sensor read failed, error count: {self.error_count}")

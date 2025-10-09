@@ -481,15 +481,34 @@ class UltimateBNO055Sensor:
             calib_status = self._read_registers(0x35, 1)
             
             if all([accel_data, gyro_data, mag_data, euler_data, calib_status]):
-                # データを適切な単位に変換
+                # データを期待される構造に変換
+                accel = self._convert_accel(accel_data)
+                gyro = self._convert_gyro(gyro_data)
+                mag = self._convert_mag(mag_data)
+                euler = self._convert_euler(euler_data)
+                calib = self._parse_calibration(calib_status[0])
+                
                 return {
                     'timestamp': time.time(),
-                    'accelerometer': self._convert_accel(accel_data),
-                    'gyroscope': self._convert_gyro(gyro_data),
-                    'magnetometer': self._convert_mag(mag_data),
-                    'euler': self._convert_euler(euler_data),
-                    'calibration': self._parse_calibration(calib_status[0]),
-                    'temperature': 25.0,  # 簡易実装
+                    'raw': {
+                        'accelerometer': accel,
+                        'gyroscope': gyro,
+                        'magnetometer': mag,
+                    },
+                    'fusion': {
+                        'euler': {
+                            'yaw': euler[0],
+                            'pitch': euler[2], 
+                            'roll': euler[1]
+                        }
+                    },
+                    'calibration': {
+                        'sys': calib[0],
+                        'gyro': calib[1], 
+                        'acc': calib[2],
+                        'mag': calib[3]
+                    },
+                    'temperature': 25.0,
                     'linear_acceleration': [0.0, 0.0, 0.0],
                     'gravity': [0.0, 0.0, 9.8]
                 }
@@ -509,8 +528,22 @@ class UltimateBNO055Sensor:
             
             # レスポンス読み取り
             response = self.serial_conn.read(2 + count)  # Header + data
+            
+            # デバッグ情報（初回のみ）
+            if start_reg == 0x00 and not hasattr(self, '_debug_shown'):
+                logger.info(f"UART Debug - Cmd: {command.hex()}, Resp: {response.hex()}")
+                self._debug_shown = True
+            
             if len(response) >= count + 2 and response[0] == 0xBB:
                 return list(response[2:])
+            elif len(response) > 0:
+                # エラー応答の場合
+                if response[0] == 0xEE:
+                    logger.warning(f"BNO055 Error response: 0x{response[1]:02X}")
+                else:
+                    logger.warning(f"Unexpected response: {response.hex()}")
+            else:
+                logger.warning(f"No response from BNO055 for register 0x{start_reg:02X}")
             
         except Exception as e:
             logger.error(f"Register read error: {e}")

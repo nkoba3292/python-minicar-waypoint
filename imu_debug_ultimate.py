@@ -119,18 +119,20 @@ class SensorDataValidator:
             if not (SafetyConfig.VALID_TEMPERATURE_RANGE[0] <= temp <= SafetyConfig.VALID_TEMPERATURE_RANGE[1]):
                 validated['temperature'] = 25.0
             
-            # 加速度チェック
+            # 加速度チェック（リスト形式 [x, y, z]）
             raw = data.get('raw', {})
-            acc = raw.get('accelerometer', {})
-            for axis in ['x', 'y', 'z']:
-                val = acc.get(axis, 0)
-                if not (SafetyConfig.VALID_ACCELERATION_RANGE[0] <= val <= SafetyConfig.VALID_ACCELERATION_RANGE[1]):
-                    validated['raw']['accelerometer'][axis] = 0.0
+            acc = raw.get('accelerometer', [0, 0, 0])
+            if isinstance(acc, list) and len(acc) >= 3:
+                for i in range(3):
+                    if not (SafetyConfig.VALID_ACCELERATION_RANGE[0] <= acc[i] <= SafetyConfig.VALID_ACCELERATION_RANGE[1]):
+                        validated['raw']['accelerometer'][i] = 0.0
             
             # ヨー角の正規化
             fusion = data.get('fusion', {})
             euler = fusion.get('euler', {})
             yaw = euler.get('yaw', 0)
+            if 'fusion' not in validated:
+                validated['fusion'] = {'euler': {}}
             validated['fusion']['euler']['yaw'] = yaw % 360
             
         except Exception as e:
@@ -521,10 +523,16 @@ class UltimateBNO055Sensor:
     def _read_registers(self, start_reg, count):
         """BNO055レジスタ読み取り"""
         try:
+            # 受信バッファをクリア
+            self.serial_conn.reset_input_buffer()
+            
             # BNO055 UART プロトコル: 0xAA, 0x01, reg, count
             command = bytes([0xAA, 0x01, start_reg, count])
             self.serial_conn.write(command)
-            time.sleep(0.01)
+            self.serial_conn.flush()  # 送信完了を確実に
+            
+            # BNO055の応答時間を考慮した待機
+            time.sleep(0.02)  # 20ms待機（エラー0x07対策）
             
             # レスポンス読み取り
             response = self.serial_conn.read(2 + count)  # Header + data

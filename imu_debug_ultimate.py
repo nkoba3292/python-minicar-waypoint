@@ -470,23 +470,32 @@ class UltimateBNO055Sensor:
             return None
         
         try:
-            # BNO055の各データレジスタを読み取り
-            # 加速度データ (0x08-0x0D)
-            accel_data = self._read_registers(0x08, 6)
-            # ジャイロデータ (0x14-0x19)  
-            gyro_data = self._read_registers(0x14, 6)
-            # 磁力計データ (0x0E-0x13)
-            mag_data = self._read_registers(0x0E, 6)
-            # オイラー角データ (0x1A-0x1F)
+            # BNO055の各データレジスタを読み取り（負荷軽減のため間隔を開ける）
+            # オイラー角データ (0x1A-0x1F) - 最重要データを最初に
             euler_data = self._read_registers(0x1A, 6)
+            time.sleep(0.005)  # 5ms間隔
+            
             # キャリブレーション状態 (0x35)
             calib_status = self._read_registers(0x35, 1)
+            time.sleep(0.005)
             
-            if all([accel_data, gyro_data, mag_data, euler_data, calib_status]):
+            # 加速度データ (0x08-0x0D)
+            accel_data = self._read_registers(0x08, 6)
+            time.sleep(0.005)
+            
+            # ジャイロデータ (0x14-0x19)  
+            gyro_data = self._read_registers(0x14, 6)
+            time.sleep(0.005)
+            
+            # 磁力計データ (0x0E-0x13)
+            mag_data = self._read_registers(0x0E, 6)
+            
+            # 最低限、オイラー角とキャリブレーションがあれば継続
+            if euler_data and calib_status:
                 # データを期待される構造に変換
-                accel = self._convert_accel(accel_data)
-                gyro = self._convert_gyro(gyro_data)
-                mag = self._convert_mag(mag_data)
+                accel = self._convert_accel(accel_data) if accel_data else [0.0, 0.0, 0.0]
+                gyro = self._convert_gyro(gyro_data) if gyro_data else [0.0, 0.0, 0.0]
+                mag = self._convert_mag(mag_data) if mag_data else [0.0, 0.0, 0.0]
                 euler = self._convert_euler(euler_data)
                 calib = self._parse_calibration(calib_status[0])
                 
@@ -722,8 +731,8 @@ class UltimateIMUMonitor:
                 except:
                     pass  # キー入力エラーは無視
                 
-                # 安全な待機
-                time.sleep(0.1)
+                # BNO055負荷軽減のための待機（10Hz → 5Hz）
+                time.sleep(0.2)
                 
             except KeyboardInterrupt:
                 print("\n🛑 Ultimate Monitor stopped by user")

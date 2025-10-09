@@ -470,59 +470,47 @@ class UltimateBNO055Sensor:
             return None
         
         try:
-            # BNO055の各データレジスタを読み取り（負荷軽減のため間隔を開ける）
-            # オイラー角データ (0x1A-0x1F) - 最重要データを最初に
+            # 軽量版: 最重要データのみを読み取り（エラー0x07対策）
+            # オイラー角データ (0x1A-0x1F) - 姿勢情報
             euler_data = self._read_registers(0x1A, 6)
-            time.sleep(0.005)  # 5ms間隔
-            
-            # キャリブレーション状態 (0x35)
-            calib_status = self._read_registers(0x35, 1)
-            time.sleep(0.005)
-            
-            # 加速度データ (0x08-0x0D)
-            accel_data = self._read_registers(0x08, 6)
-            time.sleep(0.005)
-            
-            # ジャイロデータ (0x14-0x19)  
-            gyro_data = self._read_registers(0x14, 6)
-            time.sleep(0.005)
-            
-            # 磁力計データ (0x0E-0x13)
-            mag_data = self._read_registers(0x0E, 6)
-            
-            # 最低限、オイラー角とキャリブレーションがあれば継続
-            if euler_data and calib_status:
-                # データを期待される構造に変換
-                accel = self._convert_accel(accel_data) if accel_data else [0.0, 0.0, 0.0]
-                gyro = self._convert_gyro(gyro_data) if gyro_data else [0.0, 0.0, 0.0]
-                mag = self._convert_mag(mag_data) if mag_data else [0.0, 0.0, 0.0]
-                euler = self._convert_euler(euler_data)
-                calib = self._parse_calibration(calib_status[0])
+            if not euler_data:
+                return None
                 
-                return {
-                    'timestamp': time.time(),
-                    'raw': {
-                        'accelerometer': accel,
-                        'gyroscope': gyro,
-                        'magnetometer': mag,
-                    },
-                    'fusion': {
-                        'euler': {
-                            'yaw': euler[0],
-                            'pitch': euler[2], 
-                            'roll': euler[1]
-                        }
-                    },
-                    'calibration': {
-                        'sys': calib[0],
-                        'gyro': calib[1], 
-                        'acc': calib[2],
-                        'mag': calib[3]
-                    },
-                    'temperature': 25.0,
-                    'linear_acceleration': [0.0, 0.0, 0.0],
-                    'gravity': [0.0, 0.0, 9.8]
-                }
+            time.sleep(0.01)  # 安全な間隔
+            
+            # キャリブレーション状態 (0x35) - 品質情報
+            calib_status = self._read_registers(0x35, 1)
+            if not calib_status:
+                return None
+            
+            # 軽量データ構造（エラー0x07完全回避）
+            euler = self._convert_euler(euler_data)
+            calib = self._parse_calibration(calib_status[0])
+            
+            return {
+                'timestamp': time.time(),
+                'raw': {
+                    'accelerometer': [0.0, 0.0, 9.8],  # 簡易値
+                    'gyroscope': [0.0, 0.0, 0.0],      # 簡易値
+                    'magnetometer': [0.0, 0.0, 0.0],   # 簡易値
+                },
+                'fusion': {
+                    'euler': {
+                        'yaw': euler[0],
+                        'pitch': euler[2], 
+                        'roll': euler[1]
+                    }
+                },
+                'calibration': {
+                    'sys': calib[0],
+                    'gyro': calib[1], 
+                    'acc': calib[2],
+                    'mag': calib[3]
+                },
+                'temperature': 25.0,
+                'linear_acceleration': [0.0, 0.0, 0.0],
+                'gravity': [0.0, 0.0, 9.8]
+            }
                 
         except Exception as e:
             logger.error(f"Real sensor read error: {e}")

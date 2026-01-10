@@ -203,7 +203,7 @@ print('=== 車輪速センサ初期化 ===')
 WHEEL_LATCH_PIN = 24   # RCLK (BOARD 18)
 WHEEL_DATA_PINS = [13, 21, 25]  # D0, D1, D2 (BOARD 33, 40, 22)
 WHEEL_CLEAR_PIN = 17   # CCLR (BOARD 11)
-WHEEL_DEBOUNCE_TIME = 0.05  # デバウンス時間 [s] (50ms)
+WHEEL_DEBOUNCE_TIME = 0.2  # デバウンス時間 [s] (200ms)
 
 try:
     wheel_counter = Counter74HC590(WHEEL_LATCH_PIN, WHEEL_DATA_PINS, WHEEL_CLEAR_PIN, 

@@ -57,6 +57,7 @@ class Counter74HC590:
         self.clear_pin = clear_pin
         self.last_value = 0
         self.total_count = 0
+        self.start_time = time.time()  # 初期化時刻を記録
         
         # Setup GPIO - setmode()はメインプログラムで実行済みと想定
         # sensor_placement_testと同じ設定

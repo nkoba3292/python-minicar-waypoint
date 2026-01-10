@@ -4,7 +4,13 @@ def is_in_narrow_passage(LH, RH, threshold=20):
     """
     LH, RH: 左右超音波距離[cm]
     threshold: 狭路判定閾値[cm]
+    
+    注意: LH=0やRH=0はセンサー未初期化またはエラーなので除外
     """
+    # センサーが0または無効値の場合は狭路ではない
+    if LH <= 0 or RH <= 0:
+        return False
+    # 両方が閾値未満の場合のみ狭路と判定
     return LH < threshold and RH < threshold
 
 def narrow_passage_control(motor, LH, RH, lane="left", base_speed=30):

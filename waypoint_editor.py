@@ -1,3 +1,4 @@
+from skimage.draw import line
 # waypoint_editor_with_speed_yaw_100.py
 # -*- coding: utf-8 -*-
 import matplotlib.pyplot as plt
@@ -6,8 +7,7 @@ from matplotlib.widgets import Slider, Button, RadioButtons
 import json
 import math
 import os
-from cource_map import grid_matrix, world_to_grid, grid_to_world, start_pos, goal_pos, obstacles, start_lines, pylons
-from skimage.draw import line
+from course_map import grid_matrix, world_to_grid, grid_to_world, start_pos, goal_pos, obstacles, start_lines, pylons
 from scipy.interpolate import splprep, splev
 import numpy as np
 
@@ -42,7 +42,7 @@ fig, ax = plt.subplots(dpi=120)
 plt.subplots_adjust(bottom=0.55, left=0.15)  # モード選択用にスペースを確保
 
 # 背景グリッド（ワールド座標で正しく表示）
-from cource_map import x_min, x_max, y_min, y_max, resolution
+from course_map import x_min, x_max, y_min, y_max, resolution
 
 # extentでワールド座標範囲を指定
 ax.imshow(grid_matrix, cmap="Greys", origin="lower", 
@@ -125,38 +125,41 @@ def update_plot(val=None):
         arr.remove()
     yaw_arrows = []
 
-    if waypoints:
+    # 現在のモードのwaypointsを取得
+    current_waypoints = waypoints_dict[current_mode]
+    
+    if current_waypoints:
         # グリッド座標をワールド座標に変換
-        xs = [grid_to_world(wp["x"], wp["y"])[0] for wp in waypoints]  # ワールドX座標
-        ys = [grid_to_world(wp["x"], wp["y"])[1] for wp in waypoints]  # ワールドY座標
-        wp_points.set_data(xs, ys)
+        xs = [grid_to_world(wp["x"], wp["y"])[0] for wp in current_waypoints]  # ワールドX座標
+        ys = [grid_to_world(wp["x"], wp["y"])[1] for wp in current_waypoints]  # ワールドY座標
+        wp_points_plots[current_mode].set_data(xs, ys)
 
         # --- 曲線補間（purepursuit風） ---
         if len(xs) >= 3:
             tck, u = splprep([xs, ys], s=0)
             unew = np.linspace(0, 1, max(100, len(xs)*10))
             out = splev(unew, tck)
-            wp_line.set_data(out[0], out[1])
+            wp_lines[current_mode].set_data(out[0], out[1])
         else:
-            wp_line.set_data(xs, ys)
+            wp_lines[current_mode].set_data(xs, ys)
 
         idx = int(slider.val)
-        if 0 <= idx < len(waypoints):
+        if 0 <= idx < len(current_waypoints):
             # 選択されたwaypointもワールド座標に変換
-            world_x, world_y = grid_to_world(waypoints[idx]["x"], waypoints[idx]["y"])
-            selected_wp.set_data([world_x], [world_y])
-            speed_slider.set_val(waypoints[idx]["v"])
+            world_x, world_y = grid_to_world(current_waypoints[idx]["x"], current_waypoints[idx]["y"])
+            selected_wps[current_mode].set_data([world_x], [world_y])
+            speed_slider.set_val(current_waypoints[idx]["v"])
         else:
-            selected_wp.set_data([], [])
+            selected_wps[current_mode].set_data([], [])
     else:
-        wp_line.set_data([], [])
-        wp_points.set_data([], [])
-        selected_wp.set_data([], [])
+        wp_lines[current_mode].set_data([], [])
+        wp_points_plots[current_mode].set_data([], [])
+        selected_wps[current_mode].set_data([], [])
         speed_slider.set_val(DEFAULT_SPEED)
 
     # --- yaw矢印描画（ワールド座標で） ---
     arrow_length = 0.4  # 40cm in world coordinates
-    for wp in waypoints:
+    for wp in current_waypoints:
         if "yaw" in wp:
             # グリッド座標をワールド座標に変換
             world_x, world_y = grid_to_world(wp["x"], wp["y"])
@@ -234,7 +237,10 @@ def is_valid_segment(x1, y1, x2, y2):
 def onclick(event):
     if event.inaxes != ax:
         return
-    if len(waypoints) >= MAX_WAYPOINTS:
+    # 現在のモードのwaypointsを取得
+    current_waypoints = waypoints_dict[current_mode]
+    
+    if len(current_waypoints) >= MAX_WAYPOINTS:
         print(f"Maximum {MAX_WAYPOINTS} waypoints reached")
         return
     # ワールド座標からグリッド座標に変換
@@ -249,16 +255,16 @@ def onclick(event):
         print("Waypoint rejected: on pylon")
         return
     # 直前のwaypointから壁・障害物・パイロンをまたぐ場合も不可
-    if waypoints:
-        x_prev, y_prev = waypoints[-1]["x"], waypoints[-1]["y"]
+    if current_waypoints:
+        x_prev, y_prev = current_waypoints[-1]["x"], current_waypoints[-1]["y"]
         if not is_valid_segment(x_prev, y_prev, x_click, y_click):
             print("Waypoint rejected: crosses obstacle, wall, or pylon")
             return
 
     # 最小回転半径チェック
-    if len(waypoints) >= 2:
-        x1, y1 = waypoints[-2]["x"], waypoints[-2]["y"]
-        x2, y2 = waypoints[-1]["x"], waypoints[-1]["y"]
+    if len(current_waypoints) >= 2:
+        x1, y1 = current_waypoints[-2]["x"], current_waypoints[-2]["y"]
+        x2, y2 = current_waypoints[-1]["x"], current_waypoints[-1]["y"]
         x3, y3 = x_click, y_click
         wx1, wy1 = grid_to_world(x1, y1)
         wx2, wy2 = grid_to_world(x2, y2)
@@ -268,7 +274,7 @@ def onclick(event):
             print(f"Waypoint rejected: turn radius {radius:.2f}m < {MIN_TURN_RADIUS}m")
             return
 
-    waypoints.append({"x": x_click, "y": y_click, "v": DEFAULT_SPEED})
+    current_waypoints.append({"x": x_click, "y": y_click, "v": DEFAULT_SPEED})
     update_plot()
 
 cid = fig.canvas.mpl_connect('button_press_event', onclick)

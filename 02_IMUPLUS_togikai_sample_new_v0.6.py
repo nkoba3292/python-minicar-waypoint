@@ -203,14 +203,16 @@ print('=== 車輪速センサ初期化 ===')
 WHEEL_LATCH_PIN = 24   # RCLK (BOARD 18)
 WHEEL_DATA_PINS = [13, 21, 25]  # D0, D1, D2 (BOARD 33, 40, 22)
 WHEEL_CLEAR_PIN = 17   # CCLR (BOARD 11)
-WHEEL_DEBOUNCE_TIME = 0.2  # デバウンス時間 [s] (200ms)
+WHEEL_DEBOUNCE_TIME = 0.03  # デバウンス時間 [s] (30ms)
+WHEEL_MIN_PULSE_INTERVAL = 0.02  # 最小パルス間隔 [s] (20ms)
 
 try:
     wheel_counter = Counter74HC590(WHEEL_LATCH_PIN, WHEEL_DATA_PINS, WHEEL_CLEAR_PIN, 
-                                   debounce_time=WHEEL_DEBOUNCE_TIME)
+                                   debounce_time=WHEEL_DEBOUNCE_TIME,
+                                   min_pulse_interval=WHEEL_MIN_PULSE_INTERVAL)
     wheel_last_total = wheel_counter.total_count
     wheel_last_time = time.time()
-    print(f'[車輪速センサ] 初期化完了 (初期値: {wheel_counter.last_value}, デバウンス: {WHEEL_DEBOUNCE_TIME*1000:.0f}ms)')
+    print(f'[車輪速センサ] 初期化完了 (初期値: {wheel_counter.last_value}, デバウンス: {WHEEL_DEBOUNCE_TIME*1000:.0f}ms, 最小間隔: {WHEEL_MIN_PULSE_INTERVAL*1000:.0f}ms)')
 except Exception as e:
     print(f'[車輪速センサ] 初期化失敗: {e}')
     print('[WARN] 車輪速センサなしで続行します')

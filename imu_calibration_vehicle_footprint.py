@@ -4,15 +4,24 @@
 waypoint_editor_multi_mode.pyと同じ高品質表示でIMUキャリブレーション
 車両フットプリント（180mm×350mm）を描画してIMU測定を行う
 """
+import matplotlib
+# Waylandの警告を回避するためバックエンドを明示的に設定
+matplotlib.use('TkAgg')  # または 'Qt5Agg'
 import matplotlib.pyplot as plt
+print('✓ matplotlib (backend: TkAgg)')
 from matplotlib.patches import Rectangle, Circle, Polygon
 from matplotlib.widgets import Button
+print('✓ matplotlib widgets')
 import json
 import math
 import numpy as np
+print('✓ numpy')
 from datetime import datetime
-from cource_map import grid_matrix, world_to_grid, grid_to_world, start_pos, goal_pos, obstacles, start_lines, pylons
-from cource_map import x_min, x_max, y_min, y_max, resolution
+from course_map import grid_matrix, world_to_grid, grid_to_world, start_pos, goal_pos, obstacles, start_lines, pylons
+from course_map import x_min, x_max, y_min, y_max, resolution
+print('✓ course_map')
+from matplotlib.patches import Rectangle, Circle, Polygon
+from matplotlib.widgets import Button
 
 # 文字化け完全修正 - 英語表示に変更
 plt.rcParams['font.family'] = ['DejaVu Sans']
@@ -44,8 +53,34 @@ class IMUCalibrationSystem:
         # IMU mockup mode
         self.mock_mode = True
         
+        # IMUセンサー
+        self.imu_sensor = None
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.current_yaw = 0.0
+        self.imu_offset = 0.0  # キャリブレーションオフセット
+        
+        # 加速度積分用（簡易位置推定）
+        self.velocity_x = 0.0
+        self.velocity_y = 0.0
+        self.last_update_time = None
+        
+        # 重力補正用（静止時の加速度基準値）
+        self.accel_baseline_x = None
+        self.accel_baseline_y = None
+        self.baseline_samples = []
+        self.baseline_ready = False
+        
+        # リアルタイム表示用テキスト
+        self.imu_status_text = None
+        self.target_pos_text = None
+        self.realtime_timer = None
+        
     def setup_plot(self):
         """waypoint_editor_multi_mode.pyと同じ高品質プロット設定"""
+        # インタラクティブモードを有効化（リアルタイム更新に必要）
+        plt.ion()
+        
         self.fig, self.ax = plt.subplots(figsize=(14, 10), dpi=100)
         plt.subplots_adjust(bottom=0.20, left=0.12, right=0.98, top=0.95)
         
@@ -145,6 +180,411 @@ class IMUCalibrationSystem:
                          head_width=0.08, head_length=0.12, 
                          fc=color, ec='black', alpha=0.9, linewidth=1.5)
     
+    def initialize_imu(self):
+        """IMUセンサー初期化"""
+        # キャリブレーションファイルを読み込み
+        import os
+        calib_file = "imu_2point_calib.json"
+        if os.path.exists(calib_file):
+            try:
+                with open(calib_file, 'r', encoding='utf-8') as f:
+                    calib_data = json.load(f)
+                self.imu_offset = calib_data.get('offset', 0.0)
+                print(f"✓ Loaded calibration offset: {self.imu_offset:.2f}°")
+            except Exception as e:
+                print(f"⚠️ Failed to load calibration file: {e}")
+                self.imu_offset = 0.0
+        else:
+            print(f"⚠️ Calibration file not found: {calib_file}")
+            self.imu_offset = 0.0
+        
+        # IMUセンサー初期化
+        try:
+            from IMU_sensor_bno055 import IMUSensorBNO055
+            self.imu_sensor = IMUSensorBNO055()
+            self.mock_mode = False
+            print("✓ IMU BNO055 initialized")
+        except Exception as e:
+            print(f"⚠️ IMU initialization failed: {e}")
+            print("   Running in MOCK mode")
+            self.mock_mode = True
+        
+        # 起動時に位置をPoint 1で初期化
+        pos1 = self.footprint_positions[0]
+        self.reset_position(pos1['x'], pos1['y'])
+        print(f"✓ Initial position set to Point 1: ({pos1['x']:.2f}m, {pos1['y']:.2f}m)")
+        
+        # 初期化状態を確認
+        print("\n" + "="*60)
+        print("🔍 INITIALIZATION STATUS CHECK")
+        print("="*60)
+        self.print_initialization_status()
+    
+    def print_initialization_status(self):
+        """初期化状態を詳細に表示"""
+        print(f"IMU Sensor:")
+        print(f"  - imu_sensor: {self.imu_sensor}")
+        print(f"  - mock_mode: {self.mock_mode}")
+        print(f"  - imu_offset: {self.imu_offset} (type: {type(self.imu_offset)})")
+        
+        print(f"\nPosition & Orientation:")
+        print(f"  - current_x: {self.current_x} (type: {type(self.current_x)})")
+        print(f"  - current_y: {self.current_y} (type: {type(self.current_y)})")
+        print(f"  - current_yaw: {self.current_yaw} (type: {type(self.current_yaw)})")
+        
+        print(f"\nVelocity & Integration:")
+        print(f"  - velocity_x: {self.velocity_x} (type: {type(self.velocity_x)})")
+        print(f"  - velocity_y: {self.velocity_y} (type: {type(self.velocity_y)})")
+        print(f"  - last_update_time: {self.last_update_time}")
+        
+        print(f"\nGravity Baseline:")
+        print(f"  - accel_baseline_x: {self.accel_baseline_x}")
+        print(f"  - accel_baseline_y: {self.accel_baseline_y}")
+        print(f"  - baseline_ready: {self.baseline_ready}")
+        print(f"  - baseline_samples: {len(self.baseline_samples)} samples collected")
+        
+        print(f"\nMeasurement State:")
+        print(f"  - current_measurement: {self.current_measurement}/{self.max_measurements}")
+        print(f"  - footprint_positions length: {len(self.footprint_positions)}")
+        print(f"  - Valid index range: 0-{len(self.footprint_positions)-1}")
+        print(f"  - measurement_points: {len(self.measurement_points)} points")
+        
+        # IMUから実際にデータを取得してテスト
+        if self.imu_sensor is not None and not self.mock_mode:
+            print(f"\n🧪 IMU Data Test:")
+            try:
+                test_data = self.imu_sensor.get_all()
+                print(f"  - get_all() successful: {test_data is not None}")
+                if test_data:
+                    print(f"  - yaw: {test_data.get('yaw')} (type: {type(test_data.get('yaw'))})")
+                    print(f"  - accel: {test_data.get('accel')} (type: {type(test_data.get('accel'))})")
+                    if test_data.get('accel'):
+                        print(f"    └─ accel length: {len(test_data.get('accel'))}")
+                    calib_status = self.imu_sensor.get_calibration_status()
+                    if calib_status:
+                        print(f"  - calibration: S:{calib_status.get('sys')} G:{calib_status.get('gyro')} A:{calib_status.get('accel')} M:{calib_status.get('mag')}")
+            except Exception as e:
+                print(f"  - ❌ IMU data test failed: {e}")
+        else:
+            print(f"\n🧪 IMU Data Test: Skipped (MOCK mode)")
+        
+        print("="*60 + "\n")
+    
+    def reset_position(self, x, y):
+        """位置をリセット（キャリブレーション開始時に使用）"""
+        self.current_x = x
+        self.current_y = y
+        self.velocity_x = 0.0
+        self.velocity_y = 0.0
+        self.last_update_time = None
+        
+        # 重力基準値もリセット（再キャリブレーション）
+        self.accel_baseline_x = None
+        self.accel_baseline_y = None
+        self.baseline_samples = []
+        self.baseline_ready = False
+        
+        print(f"   Position reset to: ({x:.2f}, {y:.2f})")
+        print(f"   Gravity baseline will be recalibrated...")
+    
+    def update_position_from_accel(self, accel_data):
+        """加速度から位置を簡易推定（二重積分）"""
+        import time as time_module
+        
+        # デバッグ: 関数が呼ばれていることを確認
+        if not hasattr(self, '_update_called_count'):
+            self._update_called_count = 0
+        self._update_called_count += 1
+        if self._update_called_count <= 30:  # 最初30回まで表示
+            print(f"[TRACE #{self._update_called_count}] update_position_from_accel called, accel_data={accel_data}")
+        
+        current_time = time_module.time()
+        if self.last_update_time is None:
+            self.last_update_time = current_time
+            if self._update_called_count <= 30:
+                print(f"[TRACE #{self._update_called_count}] First call - initializing last_update_time={current_time:.3f}")
+            return
+        
+        dt = current_time - self.last_update_time
+        if self._update_called_count <= 30:
+            print(f"[TRACE #{self._update_called_count}] dt={dt:.4f}s")
+            # 異常に大きなdtの場合、原因を推測
+            if dt > 1.0:
+                print(f"          ⚠️ WARNING: dt is very large! Timer may be running slowly.")
+                print(f"          Expected: ~0.05s (20Hz), Actual: {dt:.4f}s")
+        
+        # 異常な時間差は無視（ただし最初の20回は無条件で許可）
+        if self._update_called_count > 20:
+            max_dt = 2.0  # 安定後は2秒まで
+            if dt <= 0 or dt > max_dt:
+                self.last_update_time = current_time
+                if self._update_called_count <= 30:
+                    print(f"[TRACE #{self._update_called_count}] ⚠️ Abnormal dt={dt:.4f}s (max={max_dt:.1f}s) - skipping update (count > 20)")
+                return
+        else:
+            if self._update_called_count <= 30:
+                print(f"[TRACE #{self._update_called_count}] ✓ Initial startup (count ≤ 20) - dt check bypassed (dt={dt:.4f}s)")
+        
+        # dtが大きすぎる場合は制限（積分誤差を防ぐ）
+        if dt > 0.2:  # 200ms以上は制限
+            if self._update_called_count <= 30:
+                print(f"[TRACE #{self._update_called_count}] Large dt detected, clamping {dt:.4f}s -> 0.2s")
+            dt = 0.2
+        
+        # 加速度データ取得（m/s^2単位）
+        ax_ms2 = 0.0
+        ay_ms2 = 0.0
+        
+        if self._update_called_count <= 30:
+            print(f"[TRACE #{self._update_called_count}] Checking accel_data: type={type(accel_data)}, value={accel_data}")
+        
+        if accel_data is not None and isinstance(accel_data, (tuple, list)) and len(accel_data) >= 3:
+            ax, ay, az = accel_data[0], accel_data[1], accel_data[2]
+            
+            if self._update_called_count <= 30:
+                print(f"[TRACE #{self._update_called_count}] Valid accel data: ax={ax}, ay={ay}, az={az}")
+            
+            # 重力補正（簡易: z軸の重力を無視）
+            # BNO055の加速度は mg (ミリg) 単位なので m/s^2 に変換
+            ax_ms2 = ax * 9.81 / 1000.0
+            ay_ms2 = ay * 9.81 / 1000.0
+            
+            # 重力基準値のキャリブレーション（静止時の加速度を記録）
+            if not self.baseline_ready:
+                self.baseline_samples.append((ax_ms2, ay_ms2))
+                if self._update_called_count <= 25:
+                    print(f"[BASELINE] Collecting sample {len(self.baseline_samples)}/20: ax={ax_ms2:+.4f}, ay={ay_ms2:+.4f}")
+                if len(self.baseline_samples) >= 20:  # 20サンプル（1秒@20Hz）で平均
+                    self.accel_baseline_x = sum(s[0] for s in self.baseline_samples) / len(self.baseline_samples)
+                    self.accel_baseline_y = sum(s[1] for s in self.baseline_samples) / len(self.baseline_samples)
+                    self.baseline_ready = True
+                    print(f"[BASELINE] Gravity compensation calibrated:")
+                    print(f"           X: {self.accel_baseline_x:+.4f} m/s², Y: {self.accel_baseline_y:+.4f} m/s²")
+                    print(f"           Vehicle is now ready to track motion!")
+                else:
+                    if self._update_called_count <= 25:
+                        print(f"[BASELINE] Calibrating... ({len(self.baseline_samples)}/20)")
+                return  # キャリブレーション中は位置更新しない
+            
+            # 重力基準値を引いて、実際の動きによる加速度を取得
+            ax_ms2 -= self.accel_baseline_x
+            ay_ms2 -= self.accel_baseline_y
+            
+            # デバッグ出力（初回のみ詳細表示）
+            if not hasattr(self, '_debug_accel_printed'):
+                print(f"[DEBUG] Accel data: ax={ax:.2f}mg, ay={ay:.2f}mg, az={az:.2f}mg")
+                print(f"        Converted: ax={ax_ms2:.4f}m/s², ay={ay_ms2:.4f}m/s² (after baseline compensation)")
+                print(f"        Noise filter threshold: 0.1 m/s² (disabled for testing)")
+                self._debug_accel_printed = True
+            
+            # ノイズフィルタ（一時的に無効化してテスト）
+            # if abs(ax_ms2) < 0.1:
+            #     ax_ms2 = 0.0
+            # if abs(ay_ms2) < 0.1:
+            #     ay_ms2 = 0.0
+        else:
+            # エラー時: 加速度=0として処理（速度減衰のみ適用）
+            if not hasattr(self, '_debug_error_count'):
+                self._debug_error_count = 0
+            self._debug_error_count += 1
+            if self._debug_error_count <= 5:
+                print(f"[WARNING] IMU accel data error (count: {self._debug_error_count})")
+                print(f"          accel_data type: {type(accel_data)}, value: {accel_data}")
+                if accel_data is not None:
+                    print(f"          Is tuple/list? {isinstance(accel_data, (tuple, list))}")
+                    if isinstance(accel_data, (tuple, list)):
+                        print(f"          Length: {len(accel_data)}")
+        
+        # 速度更新（台形積分、エラー時は加速度=0）
+        self.velocity_x += ax_ms2 * dt
+        self.velocity_y += ay_ms2 * dt
+        
+        # 速度減衰（摩擦・空気抵抗の簡易モデル、エラー時も適用）
+        # 20Hzなので decay=0.99 で適度な減衰（1秒で18%減少）
+        decay = 0.99
+        self.velocity_x *= decay
+        self.velocity_y *= decay
+        
+        # 位置更新（エラー時も現在の速度で移動継続）
+        self.current_x += self.velocity_x * dt
+        self.current_y += self.velocity_y * dt
+        
+        # デバッグ出力（最初10回は常に表示）
+        if not hasattr(self, '_debug_pos_count'):
+            self._debug_pos_count = 0
+        if self._debug_pos_count < 15:  # 15回まで表示（BASELINE完了後も確認できるように）
+            print(f"[POS #{self._debug_pos_count+1}] dt={dt:.4f}s")
+            print(f"  Raw accel: ({ax_ms2:+.4f}, {ay_ms2:+.4f}) m/s²")
+            print(f"  Velocity:  ({self.velocity_x:+.4f}, {self.velocity_y:+.4f}) m/s")
+            print(f"  Position:  ({self.current_x:.4f}, {self.current_y:.4f}) m")
+            self._debug_pos_count += 1
+        elif self._debug_pos_count == 15:
+            print("[POS] Debug output complete. Position updates continue silently.")
+            print(f"      Current position: ({self.current_x:.4f}, {self.current_y:.4f}) m")
+            print(f"      Watch the real-time status on screen for updates.")
+            self._debug_pos_count += 1
+        
+        self.last_update_time = current_time
+    
+    def update_imu_status(self):
+        """IMUステータスをリアルタイムで更新（20Hz）"""
+        # デバッグ: 関数が呼ばれていることを確認
+        if not hasattr(self, '_status_update_count'):
+            self._status_update_count = 0
+            self._last_status_time = None
+            print("[TRACE] update_imu_status() is being called...")
+        
+        # タイマー間隔を測定
+        import time
+        current_time = time.time()
+        if self._last_status_time is not None:
+            interval = current_time - self._last_status_time
+            if self._status_update_count <= 5:
+                print(f"[TIMER] update_imu_status called, interval={interval:.4f}s (expected: 0.05s)")
+        self._last_status_time = current_time
+        self._status_update_count += 1
+        
+        try:
+            calib_status_str = ""  # 初期化（重要！）
+            calib_status_str = ""
+            if self.imu_sensor is not None and not self.mock_mode:
+                # 実際のIMUから値を取得
+                imu_data = self.imu_sensor.get_all()
+                
+                # デバッグ: IMUデータの内容確認（最初3回のみ）
+                if self._status_update_count <= 3:
+                    print(f"[IMU] get_all() returned: {imu_data}")
+                
+                raw_yaw = imu_data.get('yaw', 0.0)
+                # yawがNoneの場合は0.0にフォールバック
+                if raw_yaw is None:
+                    raw_yaw = 0.0
+                
+                # デバッグ: yawとoffsetの値確認（最初3回のみ）
+                if self._status_update_count <= 3:
+                    print(f"[YAW] raw_yaw={raw_yaw} (type={type(raw_yaw)}), imu_offset={self.imu_offset} (type={type(self.imu_offset)})")
+                
+                # キャリブレーションオフセットを適用
+                # 安全性チェック（imu_offsetのみ）
+                if self.imu_offset is None:
+                    print(f"[WARNING] imu_offset is None, setting to 0.0")
+                    self.imu_offset = 0.0
+                
+                self.current_yaw = raw_yaw + self.imu_offset
+                # 0-360度に正規化
+                while self.current_yaw < 0:
+                    self.current_yaw += 360
+                while self.current_yaw >= 360:
+                    self.current_yaw -= 360
+                
+                # 加速度データから位置を推定
+                accel_data = imu_data.get('accel', None)
+                self.update_position_from_accel(accel_data)
+                
+                # キャリブレーション状態を取得
+                calib_status = self.imu_sensor.get_calibration_status()
+                if calib_status:
+                    calib_status_str = (f"\nCalib: S:{calib_status['sys']} "
+                                      f"G:{calib_status['gyro']} "
+                                      f"A:{calib_status['accel']} "
+                                      f"M:{calib_status['mag']}")
+            else:
+                # MOCKモード: ダミー値（加速度積分もシミュレート）
+                import random
+                self.current_yaw = random.uniform(0, 360)
+                # MOCKモードでも加速度データを生成して積分テスト
+                mock_accel = (random.uniform(-200, 200), random.uniform(-200, 200), 1000)
+                self.update_position_from_accel(mock_accel)
+            
+            # ステータステキストを更新（リアルタイムデータのみ）
+            # 型チェック（エラー防止）
+            if self.current_x is None:
+                self.current_x = 0.0
+            if self.current_y is None:
+                self.current_y = 0.0
+            if self.current_yaw is None:
+                self.current_yaw = 0.0
+            
+            status_str = f"🧭 IMU Real-time Status\n"
+            status_str += f"POS: ({self.current_x:.2f}, {self.current_y:.2f})m*\n"
+            status_str += f"YAW: {self.current_yaw:.1f}°"
+            if not self.mock_mode and self.imu_offset != 0.0:
+                status_str += f" (offset: {self.imu_offset:+.1f}°)"
+            status_str += f"\nMode: {'REAL' if not self.mock_mode else 'MOCK'}"
+            status_str += calib_status_str
+            status_str += "\n* Accel-based position estimation"
+            
+            # デバッグ: 画面更新が動作しているか確認（最初3回のみ）
+            if self._status_update_count <= 3:
+                print(f"[SCREEN] Updating display: POS=({self.current_x:.2f}, {self.current_y:.2f}), YAW={self.current_yaw:.1f}°")
+            
+            # 目標位置情報を別表示（左上）
+            # 安全性チェック: current_measurementが範囲内か確認
+            measurement_index = self.current_measurement - 1
+            if measurement_index < 0 or measurement_index >= len(self.footprint_positions):
+                # 範囲外の場合は最初の位置を使用
+                measurement_index = 0
+                if self._status_update_count <= 3:
+                    print(f"[WARNING] current_measurement={self.current_measurement} out of range, using index 0")
+            
+            target_pos = self.footprint_positions[measurement_index]
+            target_str = f"📍 Target Position {self.current_measurement}\n"
+            target_str += f"POS: ({target_pos['x']:.2f}, {target_pos['y']:.2f})m\n"
+            target_str += f"YAW: {target_pos['yaw']:.1f}°"
+            
+            if self.imu_status_text is None:
+                # 初回作成（右上に表示）
+                self.imu_status_text = self.ax.text(0.98, 0.98, status_str,
+                                                    transform=self.ax.transAxes,
+                                                    fontsize=11, fontweight='bold',
+                                                    bbox=dict(boxstyle="round,pad=0.5", 
+                                                             facecolor='lightgreen', alpha=0.9),
+                                                    verticalalignment='top',
+                                                    horizontalalignment='right')
+                # 目標位置表示（左上）
+                self.target_pos_text = self.ax.text(0.02, 0.92, target_str,
+                                                    transform=self.ax.transAxes,
+                                                    fontsize=11, fontweight='bold',
+                                                    bbox=dict(boxstyle="round,pad=0.5",
+                                                             facecolor='lightyellow', alpha=0.9),
+                                                    verticalalignment='top',
+                                                    horizontalalignment='left')
+            else:
+                # 更新
+                self.imu_status_text.set_text(status_str)
+                self.target_pos_text.set_text(target_str)
+            
+            # 再描画
+            self.fig.canvas.draw_idle()
+            
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] IMU status update failed: {e}")
+            print(f"[ERROR] Exception type: {type(e).__name__}")
+            print(f"[ERROR] Full traceback:")
+            traceback.print_exc()
+        
+        # 処理時間を測定
+        if self._status_update_count <= 5:
+            processing_time = time.time() - current_time
+            print(f"[TIMER] update_imu_status processing time: {processing_time:.4f}s")
+            # 変数の型情報も表示
+            print(f"[DEBUG] Variable types and values:")
+            print(f"        current_x: type={type(self.current_x)}, value={self.current_x}")
+            print(f"        current_y: type={type(self.current_y)}, value={self.current_y}")
+            print(f"        current_yaw: type={type(self.current_yaw)}, value={self.current_yaw}")
+            print(f"        imu_offset: type={type(self.imu_offset)}, value={self.imu_offset}")
+            if hasattr(self, 'imu_sensor') and self.imu_sensor is not None:
+                print(f"        IMU sensor: initialized")
+            else:
+                print(f"        IMU sensor: None or not initialized")
+    
+    def start_realtime_update(self):
+        """リアルタイム更新タイマーを開始（20Hz）"""
+        from matplotlib.animation import FuncAnimation
+        self.realtime_timer = FuncAnimation(self.fig, lambda frame: self.update_imu_status(),
+                                           interval=50, cache_frame_data=False)  # 50ms = 20Hz
+    
     def setup_buttons(self):
         """コントロールボタンの設定"""
         # Measure IMU ボタン
@@ -192,6 +632,12 @@ class IMUCalibrationSystem:
             self.update_status("All measurements completed. Click Save Results.")
             return
         
+        # 最初の測定時に位置をリセット（Point 1の座標で初期化）
+        if self.current_measurement == 1:
+            pos_data = self.footprint_positions[0]
+            self.reset_position(pos_data['x'], pos_data['y'])
+            print(f"Position reset to Point 1: ({pos_data['x']:.2f}m, {pos_data['y']:.2f}m)")
+        
         # IMU値測定
         if self.mock_mode:
             measured_yaw = self.mock_imu_measurement()
@@ -199,11 +645,20 @@ class IMUCalibrationSystem:
             # 実際のBNO055測定コードをここに追加
             measured_yaw = self.mock_imu_measurement()
         
-        # 測定結果を保存
+        # 測定結果を保存（推定位置も記録）
         pos_data = self.footprint_positions[self.current_measurement - 1].copy()
         pos_data["measured_yaw"] = measured_yaw
+        pos_data["measured_x"] = self.current_x  # 加速度積分による推定X座標
+        pos_data["measured_y"] = self.current_y  # 加速度積分による推定Y座標
         pos_data["measurement_time"] = datetime.now().isoformat()
         self.measurement_points.append(pos_data)
+        
+        # 位置誤差を計算
+        expected_x = pos_data['x']
+        expected_y = pos_data['y']
+        pos_error = ((self.current_x - expected_x)**2 + (self.current_y - expected_y)**2)**0.5
+        print(f"Position estimation: ({self.current_x:.2f}m, {self.current_y:.2f}m) | "
+              f"Expected: ({expected_x:.2f}m, {expected_y:.2f}m) | Error: {pos_error:.2f}m")
         
         # 測定結果を画面に表示
         self.display_measurement_result(measured_yaw)
@@ -320,6 +775,7 @@ class IMUCalibrationSystem:
         
         # オフセット計算（2点の平均）
         if len(self.measurement_points) >= 2:
+            # === Yawオフセット計算 ===
             offsets = []
             for point in self.measurement_points:
                 expected = point["yaw"]
@@ -336,6 +792,51 @@ class IMUCalibrationSystem:
             
             avg_offset = sum(offsets) / len(offsets)
             calibration_data["calculated_offset"] = avg_offset
+            
+            # === 位置情報計算 ===
+            point1 = self.measurement_points[0]
+            point2 = self.measurement_points[1]
+            
+            # 2点間の距離（期待値）
+            dx = point2["x"] - point1["x"]
+            dy = point2["y"] - point1["y"]
+            distance_expected = math.sqrt(dx**2 + dy**2)
+            
+            # 2点間の角度（期待値）
+            angle_expected = math.degrees(math.atan2(dy, dx))
+            while angle_expected < 0:
+                angle_expected += 360
+            
+            # 位置情報サマリー
+            calibration_data["position_info"] = {
+                "reference_point": {
+                    "name": "Point 1 (Recommended Start Position)",
+                    "x": point1["x"],
+                    "y": point1["y"],
+                    "yaw": point1["yaw"]
+                },
+                "verification_point": {
+                    "name": "Point 2 (Verification Position)",
+                    "x": point2["x"],
+                    "y": point2["y"],
+                    "yaw": point2["yaw"]
+                },
+                "distance_between_points": distance_expected,
+                "angle_between_points": angle_expected,
+                "usage_notes": [
+                    "Use Point 1 coordinates as race start position",
+                    "Call reset_position(x={}, y={}) at race start".format(point1["x"], point1["y"]),
+                    "Simple odometry will accumulate error over time",
+                    "Recommended for short-distance courses (<10m)"
+                ]
+            }
+            
+            print(f"\n📍 Position Calibration Summary:")
+            print(f"   Reference Point 1: ({point1['x']:.2f}, {point1['y']:.2f})")
+            print(f"   Verification Point 2: ({point2['x']:.2f}, {point2['y']:.2f})")
+            print(f"   Distance: {distance_expected:.2f}m")
+            print(f"   Angle: {angle_expected:.1f}°")
+
         
         # ファイル保存
         filename = f"imu_calibration_footprint_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -343,16 +844,43 @@ class IMUCalibrationSystem:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(calibration_data, f, indent=2, ensure_ascii=False)
             
-            # 標準ファイル名でもコピー
+            # 標準ファイル名でもコピー（詳細版）
             standard_filename = "imu_custom_calib.json"
             with open(standard_filename, 'w', encoding='utf-8') as f:
                 json.dump(calibration_data, f, indent=2, ensure_ascii=False)
             
+            # imu_2point_calib.json形式でも保存（シンプル版）
+            if len(self.measurement_points) >= 2:
+                simple_calib = {
+                    "offset": calibration_data.get("calculated_offset", 0.0),
+                    "points": {
+                        "point1": {
+                            "x": point1["x"],
+                            "y": point1["y"],
+                            "yaw": point1["yaw"],
+                            "measured_yaw": point1["measured_yaw"]
+                        },
+                        "point2": {
+                            "x": point2["x"],
+                            "y": point2["y"],
+                            "yaw": point2["yaw"],
+                            "measured_yaw": point2["measured_yaw"]
+                        }
+                    },
+                    "created_at": datetime.now().isoformat()
+                }
+                simple_filename = "imu_2point_calib.json"
+                with open(simple_filename, 'w', encoding='utf-8') as f:
+                    json.dump(simple_calib, f, indent=2, ensure_ascii=False)
+                print(f"   Also saved: {simple_filename} (simple format)")
+            
             if is_valid:
                 self.update_status(f"✅ SUCCESS: Calibration saved to {filename}")
                 print(f"✅ CALIBRATION COMPLETED SUCCESSFULLY!")
-                print(f"Files saved: {filename}, {standard_filename}")
-                print(f"Calculated offset: {calibration_data.get('calculated_offset', 'N/A'):.2f}°")
+                print(f"Files saved: {filename}, {standard_filename}, imu_2point_calib.json")
+                print(f"Calculated Yaw offset: {calibration_data.get('calculated_offset', 'N/A'):.2f}°")
+                if "position_info" in calibration_data:
+                    print(f"Start position: ({point1['x']:.2f}, {point1['y']:.2f})")
             else:
                 self.update_status(f"⚠️ WARNING: Saved with validation errors. Check {filename}")
                 print(f"⚠️ CALIBRATION SAVED WITH WARNINGS!")
@@ -396,6 +924,7 @@ class IMUCalibrationSystem:
         print("• High-quality course map display (same as waypoint_editor_multi_mode.py)")
         print("• Vehicle footprint visualization (180mm × 350mm)")
         print("• 2-point IMU measurement system")
+        print("• Real-time IMU status display (updates every 1 second)")
         print("• Automatic validation and error detection")
         print("• Calibration file generation")
         print(f"\nCourse Information:")
@@ -403,9 +932,19 @@ class IMUCalibrationSystem:
         print(f"   Y range: {y_min:.1f}m - {y_max:.1f}m = {y_max-y_min:.1f}m")
         print(f"   Grid resolution: {resolution}m/pixel")
         
+        # IMU初期化
+        print("\nInitializing IMU sensor...")
+        self.initialize_imu()
+        
         self.setup_plot()
         self.draw_vehicle_footprints()
         self.setup_buttons()
+        
+        # リアルタイム更新開始
+        print("Starting real-time IMU display (20Hz updates)...")
+        print("[DEBUG] Matplotlib interactive mode:", plt.isinteractive())
+        self.start_realtime_update()
+        print("[DEBUG] FuncAnimation started successfully")
         
         print("\nInstructions:")
         print("1. Position your vehicle at Pos 1 (red footprint)")
@@ -413,6 +952,7 @@ class IMUCalibrationSystem:
         print("3. Click 'Measure IMU 1' button")
         print("4. Move to Pos 2 and repeat")
         print("5. Click 'Save Results' when both measurements are complete")
+        print("\n📊 Real-time IMU status is displayed in the top-right corner")
         
         self.update_status("Ready: Pos 1 -> Measure IMU 1")
         

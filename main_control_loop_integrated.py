@@ -1,488 +1,704 @@
-# main_control_loop.py
-# -*- coding: utf-8 -*-
-"""
-統合メインシステム - 走行モード選択 → IMUキャリブレーション → レース実行
-"""
-import json
+﻿# main_waypoint_control.py - プラットフォーム対応版
 import time
-import os
+import threading
+import queue
+import numpy as np
+import math
+import json
 import sys
-from datetime import datetime
+import argparse
+from narrow_passage_control import is_in_narrow_passage, narrow_passage_control
+from platform_detector import is_raspberry_pi, get_platform_info
 
-# IMUキャリブレーションシステムをインポート
-try:
-    from imu_calibration_vehicle_footprint import IMUCalibrationSystem
-    CALIBRATION_AVAILABLE = True
-except ImportError:
-    CALIBRATION_AVAILABLE = False
-    print("⚠️ Warning: IMU calibration system not available")
+# コマンドライン引数の解析
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Autonomous Car Control System')
+    parser.add_argument('--speed', type=float, default=None, 
+                       help='Speed scale factor (e.g., 0.33 for 1/3 speed, 0.5 for half speed)')
+    parser.add_argument('--debug', action='store_true', 
+                       help='Enable debug mode (automatically sets speed to 0.33)')
+    parser.add_argument('--config', default='config.json', 
+                       help='Configuration file path')
+    parser.add_argument('--no-ultrasonic', action='store_true',
+                       help='Disable ultrasonic sensors (use mock only - prevents WiFi disconnection)')
+    parser.add_argument('--disable-wifi', action='store_true',
+                       help='Disable WiFi during operation for maximum hardware stability')
+    return parser.parse_args()
 
-class RaceMonitor:
-    """レース中のリアルタイム監視システム"""
-    def __init__(self):
-        # 監視データ
-        self.race_data = {
-            'race_time': 0.0,
-            'current_waypoint_index': 0,
-            'total_waypoints': 0,
-            'imu_yaw': 0.0,
-            'imu_offset': 0.0,
-            'ultrasonic_distances': {'FL': 0.0, 'FR': 0.0, 'BL': 0.0, 'BR': 0.0},
-            'current_waypoint': {'x': 0.0, 'y': 0.0, 'v': 0.0, 'yaw': 0.0},
-            'next_waypoint': {'x': 0.0, 'y': 0.0, 'v': 0.0, 'yaw': 0.0},
-            'vehicle_speed': 0.0,
-            'steering_angle': 0.0,
-            'distance_to_waypoint': 0.0,
-            'battery_level': 100.0,
-            'cpu_usage': 0.0
-        }
-        
-    def update_imu_data(self, yaw, offset=0.0):
-        """IMUデータ更新"""
-        self.race_data['imu_yaw'] = yaw
-        self.race_data['imu_offset'] = offset
-        
-    def update_ultrasonic_data(self, fl, fr, bl, br):
-        """超音波センサーデータ更新"""
-        self.race_data['ultrasonic_distances'] = {
-            'FL': fl, 'FR': fr, 'BL': bl, 'BR': br
-        }
-        
-    def update_waypoint_data(self, current_index, waypoints, current_pos=(0.0, 0.0)):
-        """ウェイポイントデータ更新"""
-        self.race_data['current_waypoint_index'] = current_index
-        self.race_data['total_waypoints'] = len(waypoints)
-        
-        if 0 <= current_index < len(waypoints):
-            wp = waypoints[current_index]
-            self.race_data['current_waypoint'] = {
-                'x': wp.get('x', 0) * 0.05 - 3.2,
-                'y': wp.get('y', 0) * 0.05 - 1.5,
-                'v': wp.get('v', 100),
-                'yaw': wp.get('yaw', 0)
-            }
+def manage_wifi(enable=True):
+    """
+    WiFiを有効化/無効化する（RF-kill対応版）
+    Args:
+        enable (bool): True=WiFi有効, False=WiFi無効
+    Returns:
+        bool: 成功=True, 失敗=False
+    """
+    import subprocess
+    try:
+        if enable:
+            print("[WiFi] Enabling WiFi interface...")
             
-            # 現在位置からの距離計算
-            dx = self.race_data['current_waypoint']['x'] - current_pos[0]
-            dy = self.race_data['current_waypoint']['y'] - current_pos[1]
-            self.race_data['distance_to_waypoint'] = (dx**2 + dy**2)**0.5
-        
-        # 次のウェイポイント
-        next_index = current_index + 1
-        if next_index < len(waypoints):
-            wp_next = waypoints[next_index]
-            self.race_data['next_waypoint'] = {
-                'x': wp_next.get('x', 0) * 0.05 - 3.2,
-                'y': wp_next.get('y', 0) * 0.05 - 1.5,
-                'v': wp_next.get('v', 100),
-                'yaw': wp_next.get('yaw', 0)
-            }
+            # 1. RF-kill解除
+            print("[WiFi] Unblocking RF-kill...")
+            subprocess.run(['sudo', 'rfkill', 'unblock', 'wifi'], 
+                         check=False, capture_output=True, timeout=5)
+            time.sleep(1)
             
-    def update_vehicle_data(self, speed, steering_angle):
-        """車両データ更新"""
-        self.race_data['vehicle_speed'] = speed
-        self.race_data['steering_angle'] = steering_angle
-        
-    def update_system_data(self, race_time, battery=100.0, cpu=0.0):
-        """システムデータ更新"""
-        self.race_data['race_time'] = race_time
-        self.race_data['battery_level'] = battery
-        self.race_data['cpu_usage'] = cpu
-        
-    def display_monitor_line(self, mode_name="Unknown"):
-        """コンパクトな1行監視表示"""
-        data = self.race_data
-        
-        # フォーマット済み表示文字列作成
-        monitor_line = (
-            f"🏁 {mode_name} | "
-            f"T:{data['race_time']:6.1f}s | "
-            f"WP:{data['current_waypoint_index']+1:3d}/{data['total_waypoints']:3d} | "
-            f"IMU:{data['imu_yaw']:6.1f}° | "
-            f"Speed:{data['vehicle_speed']:6.1f} | "
-            f"Steer:{data['steering_angle']:+5.1f}° | "
-            f"Dist:{data['distance_to_waypoint']:5.2f}m | "
-            f"US: FL:{data['ultrasonic_distances']['FL']:4.1f} FR:{data['ultrasonic_distances']['FR']:4.1f} | "
-            f"Bat:{data['battery_level']:5.1f}%"
-        )
-        
-        # 画面クリア＋表示（同じ行を更新）
-        print(f"\r{monitor_line}", end="", flush=True)
-        
-    def display_detailed_monitor(self, mode_name="Unknown"):
-        """詳細監視表示"""
-        data = self.race_data
-        
-        # 画面クリア（Windows対応）
-        os.system('cls' if os.name == 'nt' else 'clear')
-        
-        print("🏁 RACE MONITORING DASHBOARD")
-        print("="*80)
-        print(f"Mode: {mode_name} | Time: {data['race_time']:.1f}s | WP: {data['current_waypoint_index']+1}/{data['total_waypoints']}")
-        print("="*80)
-        
-        # IMUデータ
-        print(f"🧭 IMU Data                📍 Current Waypoint        🚗 Vehicle Status")
-        print(f"Yaw:    {data['imu_yaw']:6.1f}°         Target: ({data['current_waypoint']['x']:5.1f}, {data['current_waypoint']['y']:5.1f})    Speed:  {data['vehicle_speed']:6.1f}")
-        print(f"Offset: {data['imu_offset']:+6.1f}°         Distance: {data['distance_to_waypoint']:5.2f}m       Steering: {data['steering_angle']:+6.1f}°")
-        print()
-        
-        # 超音波センサー
-        print(f"🔊 Ultrasonic Sensors      🎯 Next Waypoint           ⚡ System Status")
-        print(f"FL: {data['ultrasonic_distances']['FL']:4.1f}m  FR: {data['ultrasonic_distances']['FR']:4.1f}m     Target: ({data['next_waypoint']['x']:5.1f}, {data['next_waypoint']['y']:5.1f})    Battery: {data['battery_level']:5.1f}%")
-        print(f"BL: {data['ultrasonic_distances']['BL']:4.1f}m  BR: {data['ultrasonic_distances']['BR']:4.1f}m     Speed: {data['next_waypoint']['v']:6.1f}          CPU: {data['cpu_usage']:5.1f}%")
-        print("="*80)
-        
-    def mock_sensor_update(self):
-        """センサーデータのモック更新（テスト用）"""
-        import random
-        
-        # モックIMUデータ
-        self.update_imu_data(random.uniform(0, 360), self.race_data['imu_offset'])
-        
-        # モック超音波データ
-        self.update_ultrasonic_data(
-            random.uniform(0.5, 3.0),
-            random.uniform(0.5, 3.0),
-            random.uniform(0.5, 3.0),
-            random.uniform(0.5, 3.0)
-        )
-        
-        # モック車両データ
-        self.update_vehicle_data(
-            random.uniform(50, 120),
-            random.uniform(-30, 30)
-        )
-        
-        # モックシステムデータ
-        self.update_system_data(
-            self.race_data['race_time'] + 0.1,
-            random.uniform(70, 100),
-            random.uniform(20, 60)
-        )
-
-class MainControlSystem:
-    def __init__(self):
-        # 走行モード定義（waypoint_editor_multi_mode.pyと同じ）
-        self.DRIVING_MODES = {
-            'qualifying': {'name': 'Qualifying', 'file': 'waypoints_qualifying.json'},
-            'qualifying_backup': {'name': 'Qualifying Backup', 'file': 'waypoints_qualifying_backup.json'},
-            'final': {'name': 'Final Race', 'file': 'waypoints_final.json'},
-            'final_backup': {'name': 'Final Backup', 'file': 'waypoints_final_backup.json'}
-        }
-        
-        self.selected_mode = None
-        self.waypoints = []
-        self.calibration_data = None
-        self.imu_offset = 0.0
-        
-        # システム状態
-        self.system_ready = False
-        self.calibration_completed = False
-        
-        # モニタリングシステム
-        self.monitor = RaceMonitor()
-        
-    def display_startup_banner(self):
-        """システム起動時のバナー表示"""
-        print("\n" + "="*70)
-        print("🏁 AUTONOMOUS RACING SYSTEM - MAIN CONTROL")
-        print("="*70)
-        print("System Features:")
-        print("• 4-Mode Waypoint Racing (Qualifying/Final + Backup)")
-        print("• IMU Calibration Integration")
-        print("• Real-time Race Control")
-        print("• Safety & Monitoring")
-        print(f"Calibration System: {'✅ Available' if CALIBRATION_AVAILABLE else '❌ Not Available'}")
-        print("="*70)
-    
-    def select_driving_mode(self):
-        """走行モード選択"""
-        print("\n📋 DRIVING MODE SELECTION")
-        print("="*50)
-        
-        # 利用可能なモード表示
-        mode_list = []
-        for i, (mode_key, mode_info) in enumerate(self.DRIVING_MODES.items(), 1):
-            file_exists = os.path.exists(mode_info['file'])
-            status = "✅ Ready" if file_exists else "❌ No Data"
-            print(f"  {i}. {mode_info['name']} - {status}")
-            mode_list.append(mode_key)
-        
-        # モード選択
-        while True:
-            try:
-                print(f"\nSelect mode (1-{len(mode_list)}): ", end="")
-                choice = int(input())
-                if 1 <= choice <= len(mode_list):
-                    selected_key = mode_list[choice - 1]
-                    self.selected_mode = selected_key
-                    
-                    # Waypointファイル読み込み
-                    waypoint_file = self.DRIVING_MODES[selected_key]['file']
-                    if self.load_waypoints(waypoint_file):
-                        print(f"✅ Mode Selected: {self.DRIVING_MODES[selected_key]['name']}")
-                        print(f"📍 Waypoints Loaded: {len(self.waypoints)} points")
-                        return True
-                    else:
-                        print(f"❌ Failed to load waypoints from {waypoint_file}")
-                        continue
-                else:
-                    print("❌ Invalid selection. Please try again.")
-            except ValueError:
-                print("❌ Please enter a number.")
-            except KeyboardInterrupt:
-                print("\n🛑 Operation cancelled.")
-                return False
-    
-    def load_waypoints(self, filename):
-        """Waypointファイル読み込み"""
-        try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                self.waypoints = json.load(f)
-            return True
-        except Exception as e:
-            print(f"❌ Error loading waypoints: {e}")
-            return False
-    
-    def run_imu_calibration(self):
-        """IMUキャリブレーション実行"""
-        if not CALIBRATION_AVAILABLE:
-            print("❌ IMU Calibration system not available")
-            return False
-        
-        print("\n🎯 IMU CALIBRATION")
-        print("="*50)
-        print("📡 Starting IMU calibration system...")
-        print("📋 Instructions:")
-        print("  1. Position vehicle at Pos 1 (red footprint)")  
-        print("  2. Click 'Measure IMU 1' button")
-        print("  3. Move to Pos 2 (blue footprint)")
-        print("  4. Click 'Measure IMU 2' button") 
-        print("  5. Click 'Save Results' to complete")
-        print("  6. Close the calibration window to continue")
-        print("\n🔄 Launching calibration interface...")
-        
-        try:
-            # IMUキャリブレーションシステム実行
-            calibration_system = IMUCalibrationSystem()
-            calibration_system.run_calibration_system()
+            # 2. インターフェース有効化
+            print("[WiFi] Bringing up interface...")
+            subprocess.run(['sudo', 'ifconfig', 'wlan0', 'up'], 
+                         check=True, capture_output=True, timeout=5)
+            time.sleep(1)
             
-            # キャリブレーション完了後の確認メッセージ
-            print("\n🎯 Calibration window closed.")
-            print("⏳ Loading calibration results...")
+            # 3. wpa_supplicant再起動（接続確立）
+            print("[WiFi] Restarting wpa_supplicant...")
+            subprocess.run(['sudo', 'systemctl', 'restart', 'wpa_supplicant'], 
+                         check=False, capture_output=True, timeout=10)
+            time.sleep(2)
             
-            # キャリブレーション完了後、ファイル読み込み
-            return self.load_calibration_data()
+            # 4. dhcpcd再起動（IPアドレス取得）
+            print("[WiFi] Restarting dhcpcd...")
+            subprocess.run(['sudo', 'systemctl', 'restart', 'dhcpcd'], 
+                         check=False, capture_output=True, timeout=10)
+            time.sleep(3)
             
-        except Exception as e:
-            print(f"❌ Calibration error: {e}")
-            return False
-    
-    def load_calibration_data(self):
-        """キャリブレーションデータ読み込み"""
-        calibration_files = ["imu_custom_calib.json"]
-        
-        for filename in calibration_files:
-            try:
-                with open(filename, 'r', encoding='utf-8') as f:
-                    self.calibration_data = json.load(f)
-                
-                if self.calibration_data.get('validation', {}).get('is_valid', False):
-                    self.imu_offset = self.calibration_data.get('calculated_offset', 0.0)
-                    print(f"✅ Calibration loaded: Offset = {self.imu_offset:.2f}°")
-                    self.calibration_completed = True
-                    return True
-                else:
-                    print(f"⚠️ Calibration validation failed: {self.calibration_data.get('validation', {}).get('message', 'Unknown error')}")
-                    
-            except FileNotFoundError:
-                continue
-            except Exception as e:
-                print(f"❌ Error reading calibration: {e}")
-        
-        print("❌ No valid calibration data found")
+            print("[WiFi] WiFi enabled and reconnecting...")
+        else:
+            print("[WiFi] Disabling WiFi interface for hardware stability...")
+            subprocess.run(['sudo', 'ifconfig', 'wlan0', 'down'], 
+                         check=True, capture_output=True, timeout=5)
+            print("[WiFi] WiFi disabled - CPU/GPIO resources freed")
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"[ERROR] WiFi {'enable' if enable else 'disable'} timeout")
         return False
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] WiFi {'enable' if enable else 'disable'} failed: {e}")
+        return False
+    except Exception as e:
+        print(f"[ERROR] WiFi management error: {e}")
+        return False
+
+# コマンドライン引数解析
+args = parse_arguments()
+
+# 設定ファイル読み込み
+try:
+    with open(args.config, 'r') as f:
+        config = json.load(f)
+    print(f"[OK] Configuration loaded from {args.config}")
+except FileNotFoundError:
+    print(f"[INFO] {args.config} not found, using default settings")
+    config = {}
+
+# プラットフォーム情報取得
+platform_info = get_platform_info()
+print(f"Running on: {platform_info['system']} ({'Raspberry Pi' if platform_info['is_raspberry_pi'] else 'PC/Mock'})")
+
+# ---- プラットフォーム別モジュール読み込み ----
+if platform_info['is_raspberry_pi']:
+    print("Loading Raspberry Pi hardware drivers...")
+    try:
+        from pca9685_motor_driver import PCA9685MotorDriver
+        from IMU_sensor_bno055 import IMUSensorBNO055  # 新UART版IMU
+        PLATFORM_MODE = "raspberry_pi"
+        print("[OK] Hardware drivers loaded successfully")
+    except ImportError as e:
+        print(f"Hardware drivers not found: {e}")
+        print("Fallback to mock mode")
+        PLATFORM_MODE = "mock"
+else:
+    print("Running in PC/Mock mode")
+    PLATFORM_MODE = "mock"
+
+# ---- 超音波センサーモジュール読み込み（ポーリング方式） ----
+try:
+    import ultrasonic_array_polling
+    print("[OK] Ultrasonic array module loaded (polling mode)")
+except ImportError as e:
+    print(f"[INFO] Ultrasonic array module not found: {e}")
+    print("      Will use mock ultrasonic if needed")
+    ultrasonic_array_polling = None
+
+# ---- 設定（config.json から読み込み、デフォルト値で補完） ----
+WAYPOINT_FILE = config.get('waypoints', {}).get('file', 'quarify.json')
+LOOP_DELAY = config.get('system', {}).get('loop_delay', 0.05)
+SAFE_DIST_FRONT = config.get('system', {}).get('safe_dist_front', 5)
+SAFE_DIST_SIDE = config.get('system', {}).get('safe_dist_side', 7)
+USE_NARROW_PASSAGE = config.get('system', {}).get('use_narrow_passage', True)
+
+# デバッグ・速度制御設定（コマンドライン引数で上書き可能）
+DEBUG_MODE = args.debug or config.get('system', {}).get('debug_mode', False)
+SPEED_SCALE = args.speed if args.speed is not None else config.get('system', {}).get('speed_scale', 1.0)
+
+# デバッグモードが有効な場合、速度を自動的に1/3に
+if DEBUG_MODE and args.speed is None:
+    SPEED_SCALE = 0.33
+
+# プラットフォーム別設定
+if PLATFORM_MODE == "raspberry_pi":
+    platform_config = config.get('platform_specific', {}).get('raspberry_pi', {})
+elif PLATFORM_MODE == "mock":
+    platform_config = config.get('platform_specific', {}).get('pc_test', {})
+else:
+    platform_config = {}
+
+print(f"Configuration loaded: Waypoints={WAYPOINT_FILE}, Loop={LOOP_DELAY*1000:.0f}ms, Platform={PLATFORM_MODE}")
+if DEBUG_MODE:
+    print(f"[DEBUG MODE] Speed reduced to {SPEED_SCALE*100:.0f}% of normal speed")
+else:
+    print("[NORMAL MODE] Full speed operation")
+
+# ---- 車両制御フラグ ----
+running_flag = threading.Event()  # 走行中フラグ
+pause_flag = threading.Event()    # 一時停止フラグ
+
+# ---- 状態送信キュー ----
+status_queue = queue.Queue()
+
+# ---- Waypoint読み込み ----
+with open(WAYPOINT_FILE, 'r') as f:
+    waypoints = json.load(f)
+
+# ---- モータドライブ（プラットフォーム別） ----
+if PLATFORM_MODE == "raspberry_pi" and 'PCA9685MotorDriver' in globals():
+    print("Initializing PCA9685 motor driver...")
+    motor = PCA9685MotorDriver(config_file=args.config)
+else:
+    print("Using motor mock...")
     
-    def system_status_check(self):
-        """システム状態確認"""
-        print("\n🔍 SYSTEM STATUS CHECK")
-        print("="*50)
-        
-        # 走行モード確認
-        mode_status = "✅ Ready" if self.selected_mode else "❌ Not Selected"
-        waypoint_status = f"✅ {len(self.waypoints)} points" if self.waypoints else "❌ No Data"
-        
-        # キャリブレーション確認
-        calib_status = "✅ Completed" if self.calibration_completed else "❌ Required"
-        offset_info = f"({self.imu_offset:.2f}°)" if self.calibration_completed else ""
-        
-        print(f"📋 Driving Mode: {mode_status}")
-        if self.selected_mode:
-            print(f"   → {self.DRIVING_MODES[self.selected_mode]['name']}")
-        print(f"📍 Waypoints: {waypoint_status}")
-        print(f"🎯 IMU Calibration: {calib_status} {offset_info}")
-        
-        # システム準備完了判定
-        self.system_ready = (self.selected_mode is not None and 
-                           len(self.waypoints) > 0 and 
-                           self.calibration_completed)
-        
-        status_icon = "🟢" if self.system_ready else "🔴"
-        status_text = "READY FOR RACING" if self.system_ready else "SETUP INCOMPLETE"
-        
-        print(f"\n{status_icon} System Status: {status_text}")
-        return self.system_ready
+    class MotorDriveMock:
+        def __init__(self):
+            self.speed = 0
+            self.steer_angle = 0
+
+        def accel(self, duty):
+            self.speed = duty * SPEED_SCALE  # 速度制限適用
+            if DEBUG_MODE:
+                print(f"[Motor Mock] Speed {self.speed:.2f} (scaled from {duty:.2f})")
+
+        def steer(self, duty):
+            self.steer_angle = duty
+            if DEBUG_MODE:
+                print(f"[Motor Mock] Steer {duty:.2f}°")
+
+        def stop(self):
+            self.accel(0)
+            self.steer(0)
+            
+    motor = MotorDriveMock()
+
+# ---- IMUセンサー（プラットフォーム別） ----
+# ====== デバッグ用: IMU無効化 ======
+# 超音波センサー単体テストのため、IMUを一時的に無効化
+# 元に戻す場合: 下の3行のコメントを外し、この行と次の行を削除
+USE_IMU_DEBUG = False  # True=IMU有効, False=IMU無効（超音波テスト用）
+
+if USE_IMU_DEBUG and PLATFORM_MODE == "raspberry_pi" and 'IMUSensorBNO055' in globals():
+# if PLATFORM_MODE == "raspberry_pi" and 'IMUSensorBNO055' in globals():  # ← 元に戻す時はこの行のコメント外す
+    print("Initializing IMU_sensor_bno055 (UART) driver...")
+    imu_sensor = IMUSensorBNO055(
+        port='/dev/serial0',
+        baudrate=115200,
+        offset=0.0,
+        calib_file='bno055_calibdata.bin'
+    )
     
-    def wait_for_race_start(self):
-        """レース開始待機"""
-        if not self.system_ready:
-            print("❌ System not ready for racing")
-            return False
+    def get_yaw():
+        return imu_sensor.get_yaw()
         
-        print("\n🏁 RACE START PREPARATION")
-        print("="*50)
-        print("📋 Pre-race Checklist:")
-        print(f"   ✅ Mode: {self.DRIVING_MODES[self.selected_mode]['name']}")
-        print(f"   ✅ Waypoints: {len(self.waypoints)} loaded")
-        print(f"   ✅ IMU Offset: {self.imu_offset:.2f}°")
-        print("\n🚗 VEHICLE POSITIONING INSTRUCTIONS:")
-        print("="*50)
-        print("   1. 🎯 Place vehicle at START position on the course")
-        print("   2. 🧭 Align vehicle with the start line direction")
-        print("   3. 🔋 Check battery level (ensure sufficient power)")
-        print("   4. 👀 Ensure clear racing path (no obstacles)")
-        print("   5. ⚡ Verify all systems operational")
-        print("   6. 🔧 Double-check vehicle is properly calibrated")
+    def get_sensor_info():
+        return imu_sensor.get_sensor_info()
+else:
+    print("Using IMU mock... (DEBUG: IMU disabled for ultrasonic test)")
+    
+    class IMUMock:
+        def __init__(self):
+            self.yaw = 0.0
+            self.calibrated = True  # モックは常にキャリブレーション済み
+            
+        def get_yaw(self):
+            # 仮のヨー角変化をシミュレート
+            import random
+            self.yaw += random.uniform(-0.1, 0.1)
+            return self.yaw
+            
+        def get_sensor_info(self):
+            return {'connected': False, 'is_calibrated': True}
         
-        print(f"\n🟢 System is READY for racing!")
-        print(f"⏳ When vehicle is positioned correctly, press ENTER to start racing...")
+        def get_position(self):
+            # 位置情報のモック（0, 0固定）
+            return (0.0, 0.0)
         
-        try:
-            input()  # Enter待機
+        def is_calibrated(self):
+            # キャリブレーション状態（常にTrue）
             return True
-        except KeyboardInterrupt:
-            print("\n🛑 Race start cancelled.")
-            return False
+        
+        def get_calibration_status(self):
+            # キャリブレーションステータス（全て完了）
+            return {'sys': 3, 'gyro': 3, 'accel': 3, 'mag': 3}
     
-    def run_race(self):
-        """レース実行（リアルタイムモニタリング付きメインループ）"""
-        print("\n🏁 RACE STARTED!")
-        print("="*80)
-        print(f"🎯 Mode: {self.DRIVING_MODES[self.selected_mode]['name']}")
-        print(f"📍 Following {len(self.waypoints)} waypoints")
-        print(f"🧭 IMU Offset: {self.imu_offset:.2f}°")
-        print("🔍 Real-time monitoring active...")
-        print("="*80)
-        
-        race_start_time = time.time()
-        mode_name = self.DRIVING_MODES[self.selected_mode]['name']
-        
-        # モニターシステム初期化
-        self.monitor.update_system_data(0.0)
-        
-        # レースループ（モニタリング統合版）
-        try:
-            for i, waypoint in enumerate(self.waypoints):
-                elapsed = time.time() - race_start_time
-                
-                # 現在位置（仮想位置 - 実際にはGPS/オドメトリから取得）
-                current_pos = (
-                    waypoint.get('x', 0) * 0.05 - 3.2,  # 仮想現在地
-                    waypoint.get('y', 0) * 0.05 - 1.5
-                )
-                
-                # モニタリングデータ更新
-                self.monitor.update_waypoint_data(i, self.waypoints, current_pos)
-                self.monitor.update_system_data(elapsed)
-                
-                # センサーデータ更新（モック - 実際のセンサーと置き換え）
-                self.monitor.mock_sensor_update()
-                
-                # IMUオフセット適用
-                self.monitor.race_data['imu_offset'] = self.imu_offset
-                
-                # リアルタイム監視表示
-                self.monitor.display_monitor_line(mode_name)
-                
-                # 制御ロジック（ここに実装）
-                # - IMU読み取り + オフセット補正
-                # - モーター制御
-                # - 超音波センサー監視
-                # - Pure Pursuit アルゴリズム
-                # - 障害物回避
-                
-                time.sleep(0.1)  # 制御周期（10Hz）
-                
-                # 詳細表示モード切り替え（デバッグ用）
-                # 5秒ごとに詳細表示（オプション）
-                if i % 50 == 0 and i > 0:  # 5秒ごと
-                    print()  # 改行
-                    self.monitor.display_detailed_monitor(mode_name)
-                    time.sleep(2)  # 2秒間詳細表示
-                
-        except KeyboardInterrupt:
-            print(f"\n🛑 RACE STOPPED (Manual Stop)")
-            
-        except Exception as e:
-            print(f"\n❌ RACE ERROR: {e}")
-            
-        finally:
-            # レース終了処理
-            total_time = time.time() - race_start_time
-            print(f"\n\n🏁 RACE COMPLETED")
-            print("="*80)
-            print(f"   Total Time: {total_time:.1f} seconds")
-            print(f"   Waypoints: {len(self.waypoints)} processed")
-            print(f"   Mode: {mode_name}")
-            print(f"   Final Waypoint: {self.monitor.race_data['current_waypoint_index']+1}")
-            print("="*80)
-            
-            # 最終統計表示
-            print("\n📊 RACE STATISTICS:")
-            print(f"   Average Speed: {self.monitor.race_data['vehicle_speed']:.1f}")
-            print(f"   Final IMU Reading: {self.monitor.race_data['imu_yaw']:.1f}°")
-            print(f"   IMU Offset Used: {self.imu_offset:.2f}°")
+    imu_mock = IMUMock()
+    imu_sensor = imu_mock  # imu_sensorとしてもアクセス可能に
     
-    def main_loop(self):
-        """メインシステムループ"""
-        self.display_startup_banner()
+    def get_yaw():
+        return imu_mock.get_yaw()
         
+    def get_sensor_info():
+        return imu_mock.get_sensor_info()
+
+# IMU 2段階キャリブレーション: BNO055内蔵 + コース環境補正
+print("Setting up IMU calibration system...")
+
+# Stage 1: BNO055内蔵キャリブレーション（センサーレベル）
+if PLATFORM_MODE == "raspberry_pi" and 'imu_sensor' in globals():
+    print("[OK] BNO055 hardware calibration active (UART mode)")
+    
+    def get_hardware_calibrated_yaw():
+        """BNO055内蔵キャリブレーション済みヨー角"""
+        return imu_sensor.get_yaw()
+        
+    # キャリブレーション状態確認
+    if imu_sensor.is_calibrated():
+        print("[OK] BNO055 sensor calibration complete")
+    else:
+        print("[WARN] BNO055 sensor calibration in progress...")
+else:
+    print("Using mock IMU (BNO055 hardware calibration unavailable)")
+    
+    def get_hardware_calibrated_yaw():
+        """モック環境での基本ヨー角"""
+        return get_yaw()
+
+# Stage 2: 実走行コース環境補正（マップ表示付き推奨）
+course_calibrator = None
+
+# レース用：事前保存されたキャリブレーションファイル読み込み専用
+# 注意: キャリブレーション取得は事前に imu_visual_calibration.py で実行済み
+
+course_offset = 0.0
+calibration_method = "none"
+
+# 優先順位でキャリブレーションファイルを探索・読み込み
+calibration_files = [
+    ("imu_custom_calib.json", "custom_user_selection"),  # 最優先：ユーザーカスタム選択
+    ("imu_visual_calib.json", "visual_map"),
+    ("imu_landmark_calib.json", "landmark"),  
+    ("imu_2point_calib.json", "2point")
+]
+
+for calib_file, method in calibration_files:
+    try:
+        with open(calib_file, 'r') as f:
+            calib_data = json.load(f)
+        
+        # カスタムキャリブレーション形式の処理
+        if method == "custom_user_selection":
+            # 新形式: calibration_result.yaw_offset
+            if 'calibration_result' in calib_data and 'yaw_offset' in calib_data['calibration_result']:
+                course_offset = math.radians(calib_data['calibration_result']['yaw_offset'])
+            # 旧形式: calculated_offset（ラジアン）
+            elif 'calculated_offset' in calib_data:
+                course_offset = calib_data['calculated_offset']
+            else:
+                print(f"[WARN] Invalid custom calibration format in {calib_file}")
+                print(f"       Expected 'calibration_result.yaw_offset' or 'calculated_offset'")
+                continue
+        else:
+            # 従来形式の処理
+            course_offset = calib_data.get('offset', 0.0)
+        
+        calibration_method = method
+        
+        print(f"[OK] Course calibration loaded: {method.upper().replace('_', ' ')} PRECISION")
+        print(f"  File: {calib_file}")
+        print(f"  Offset: {math.degrees(course_offset):.2f}°")
+        
+        # タイムスタンプ表示
+        if 'calibration_date' in calib_data:
+            print(f"  Date: {calib_data['calibration_date']}")
+        elif 'timestamp' in calib_data:
+            print(f"  Date: {calib_data['timestamp']}")
+        
+        # カスタムキャリブレーション情報
+        if method == "custom_user_selection" and 'usage_instructions' in calib_data:
+            instructions = calib_data['usage_instructions']
+            print(f"  Reference: {instructions.get('reference_heading', 'N/A')}")
+            print(f"  Position: {instructions.get('vehicle_position', 'N/A')}")
+        
+        break
+        
+    except FileNotFoundError:
+        continue
+    except Exception as e:
+        print(f"[WARN] Error loading {calib_file}: {e}")
+        continue
+
+if calibration_method == "none":
+    print("[WARN] No course calibration found, using hardware calibration only")
+    print("  Run imu_visual_calibration.py before race to generate calibration")
+
+# キャリブレーション適用関数（軽量版）
+def get_course_calibrated_yaw():
+    """段階的キャリブレーション: BNO055内蔵 → コース環境補正"""
+    hardware_yaw = get_hardware_calibrated_yaw()  # Stage 1
+    calibrated = hardware_yaw + course_offset     # Stage 2
+    
+    # -π to π の範囲に正規化
+    while calibrated > math.pi:
+        calibrated -= 2 * math.pi
+    while calibrated < -math.pi:
+        calibrated += 2 * math.pi
+        
+    return calibrated
+
+# 最終キャリブレーション済みヨー角
+get_calibrated_yaw = get_course_calibrated_yaw
+yaw = get_calibrated_yaw()
+
+if calibration_method != "none":
+    print(f"[OK] Race-ready calibration active ({calibration_method}): {math.degrees(yaw):.2f}°")
+else:
+    print(f"[INFO] Hardware calibration only: {math.degrees(yaw):.2f}°")
+
+print(f"Initial Yaw: {math.degrees(yaw):.2f}°")
+
+# ---- 超音波センサスレッド初期化 ----
+ultra_array = None  # グローバル変数として初期化
+
+# システムリソース確認（WiFi切断診断用）
+try:
+    import psutil
+    mem = psutil.virtual_memory()
+    cpu_percent = psutil.cpu_percent(interval=1)
+    print(f"[INFO] System resources before ultrasonic init:")
+    print(f"       Memory: {mem.percent}% used ({mem.available/1024/1024:.0f}MB available)")
+    print(f"       CPU: {cpu_percent}% usage")
+except ImportError:
+    print("[INFO] psutil not available - install for resource monitoring")
+
+# コマンドラインで無効化されている場合はスキップ
+if args.no_ultrasonic:
+    print("[INFO] Ultrasonic sensors disabled by --no-ultrasonic flag")
+    print("       Using mock ultrasonic (WiFi disconnection prevention mode)")
+elif PLATFORM_MODE == "raspberry_pi" and ultrasonic_array_polling is not None:
+    print("Initializing ultrasonic array (polling mode - togikai-compliant)...")
+    try:
+        # togikai準拠：待機なし、即座に初期化
+        ultra_array = ultrasonic_array_polling.UltrasonicSensorsPolling(debug_mode=False)
+        print("[OK] Ultrasonic array initialized (polling mode)")
+        
+        # 初回測定テスト
+        print("Testing initial sensor measurement...")
+        distances = ultra_array.measure_once()
+        print(f"  Initial readings: FR={distances[0]:.1f} L45={distances[1]:.1f} L90={distances[2]:.1f} R45={distances[3]:.1f} R90={distances[4]:.1f}")
+        
+        if distances and any(d < 200 for d in distances):
+            print("[OK] Ultrasonic sensors working")
+        else:
+            print(f"[WARN] All sensors timeout - check hardware connections")
+            # タイムアウトでも続行（障害物なしとして動作）
+        
+    except Exception as e:
+        print(f"[WARN] Ultrasonic initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
+        ultra_array = None  # 例外時はNoneにしてモックへフォールバック
+
+# モックへのフォールバック（Raspberry Piでの初期化失敗時 or PC環境）
+if ultra_array is None:
+    print("Using ultrasonic mock...")
+    
+    class UltrasonicArrayMock:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.FR = 100
+            self.LH = 100
+            self.RH = 100
+            self.RLH = 100
+            self.RRH = 100
+
+        def update(self):
+            import random
+            with self.lock:
+                self.FR = random.uniform(5, 200)
+                self.LH = random.uniform(5, 200)
+                self.RH = random.uniform(5, 200)
+                self.RLH = random.uniform(5, 200)
+                self.RRH = random.uniform(5, 200)
+
+        def get_all(self):
+            with self.lock:
+                return self.FR, self.LH, self.RH, self.RLH, self.RRH
+        
+        def get_distances(self):
+            return self.get_all()
+
+    ultra_array = UltrasonicArrayMock()
+
+    def ultrasonic_loop():
+        while True:
+            ultra_array.update()
+            time.sleep(0.1)
+
+    threading.Thread(target=ultrasonic_loop, daemon=True).start()
+
+# センサー初期化確認
+print(f"[INFO] Ultrasonic sensor type: {type(ultra_array).__name__}")
+print(f"[INFO] Has get_distances: {hasattr(ultra_array, 'get_distances')}")
+
+# ---- オドメトリシステム (モック) ----
+class OdometryMock:
+    def __init__(self):
+        self.x = 0.0
+        self.y = 0.0
+        
+    def get_position(self):
+        return self.x, self.y
+        
+    def update_position(self, dx, dy):
+        self.x += dx
+        self.y += dy
+
+odom = OdometryMock()
+
+# ---- キャリブレーション済みYaw値取得関数 ----
+def get_current_yaw():
+    """現在のキャリブレーション済みヨー角を取得"""
+    if PLATFORM_MODE == "raspberry_pi" and 'get_calibrated_yaw' in globals():
+        return get_calibrated_yaw()
+    else:
+        return get_yaw()
+
+# 初期Yaw値取得
+current_yaw = get_current_yaw()
+print(f"Current Yaw: {math.degrees(current_yaw):.2f}°")
+
+# ---- Legacy IMUキャリブレーション (オプション) ----
+# （Raspberry Pi実機環境で利用される可能性のある旧システム互換性維持用）
+
+# ---- メイン制御ループ ----
+def waypoint_control_loop():
+    idx = 0
+    n_wp = len(waypoints)
+    running_flag.wait()  # スタート待ち
+    lap = 1  # 1周目からスタート
+
+    while idx < n_wp:
+        if pause_flag.is_set():
+            motor.accel(0)
+            motor.steer(0)
+            time.sleep(0.05)
+            continue
+
+        # 現在 waypoint
+        wp = waypoints[idx]
+        wp_x, wp_y = wp['x'], wp['y']
+
+        # 超音波距離取得（ポーリング方式: 必要な時だけ測定）
+        # 10サイクルに1回測定（50ms × 10 = 500ms間隔）
+        if hasattr(ultra_array, 'measure_once'):
+            # ポーリングモード: 10サイクルに1回測定
+            if idx % 10 == 0 or idx == 0:
+                distances = ultra_array.measure_once()
+            else:
+                distances = ultra_array.get_distances()  # 前回の値を使用
+        else:
+            # モックモード: 常に取得
+            distances = ultra_array.get_distances()
+        
+        if distances is None or len(distances) < 5:
+            print(f"[WARN] Invalid ultrasonic data: {distances}")
+            FR, LH, RH, RLH, RRH = 100, 100, 100, 100, 100  # デフォルト値
+        else:
+            FR, LH, RH, RLH, RRH = distances[0], distances[1], distances[2], distances[3], distances[4]
+        
+        # デバッグ: 最初のループで値を確認
+        if idx == 0 and DEBUG_MODE:
+            print(f"[DEBUG] Ultrasonic raw: FR={FR} LH={LH} RH={RH} RLH={RLH} RRH={RRH}")
+
+        # 狭路判定・制御
+        if USE_NARROW_PASSAGE and is_in_narrow_passage(LH, RH):
+            print("Narrow passage detected!")
+            if wp.get('narrow', False):
+                # 周回ごとに進路を選択
+                if lap == 1:
+                    lane = "left"
+                elif lap == 2:
+                    lane = "center"
+                elif lap == 3:
+                    lane = "right"
+                elif lap == 4:
+                    lane = "left"
+                else:
+                    lane = "center"
+                narrow_passage_control(motor, LH, RH, lane=lane)
+                status_queue.put({'event':'narrow_passage', 'wp_idx': idx, 'lane': lane})
+                time.sleep(0.1)
+                continue
+
+        # 障害物判定
+        if FR < SAFE_DIST_FRONT:
+            motor.accel(-50)
+            motor.steer(0)
+            print("Obstacle Front! Stop/Reverse")
+            status_queue.put({'event':'obstacle_front', 'wp_idx': idx})
+            time.sleep(0.1)
+            continue
+
+        # ウェイポイント情報の活用
+        target_speed = wp.get('v', 50)  # ウェイポイント指定速度、デフォルト50
+        target_yaw = wp.get('yaw', 0)   # ウェイポイント指定方位角
+        
+        # デバッグモード時の速度調整
+        if DEBUG_MODE:
+            target_speed = target_speed * SPEED_SCALE
+            if target_speed < 10:  # 最低速度保証
+                target_speed = 10
+        
+        # 現在位置取得 (IMUまたはオドメトリから)
+        if PLATFORM_MODE == "raspberry_pi" and 'imu_sensor' in globals() and hasattr(imu_sensor, 'get_position'):
+            pos_data = imu_sensor.get_position()
+            # get_position()が返す値の数を確認
+            if isinstance(pos_data, (list, tuple)):
+                if len(pos_data) >= 2:
+                    current_x, current_y = pos_data[0], pos_data[1]
+                else:
+                    current_x, current_y = 0, 0  # フォールバック
+            else:
+                current_x, current_y = 0, 0  # フォールバック
+        else:
+            current_x, current_y = odom.get_position()
+        
+        # 現在のヨー角取得
+        current_yaw = get_current_yaw()
+        
+        # 目標方位角の決定
+        if 'yaw' in wp:
+            # Waypointにyawが指定されている場合はそれを使用
+            target_yaw_rad = math.radians(wp['yaw'])
+        else:
+            # Waypointへの方向を現在位置から計算
+            dx = wp_x - current_x
+            dy = wp_y - current_y
+            target_yaw_rad = math.atan2(dy, dx)
+        
+        # ヨー角差分計算（-π to π に正規化）
+        yaw_error = target_yaw_rad - current_yaw
+        while yaw_error > math.pi:
+            yaw_error -= 2 * math.pi
+        while yaw_error < -math.pi:
+            yaw_error += 2 * math.pi
+        
+        # ステアリング角度に変換（比例制御）
+        steer_gain = config.get('motor', {}).get('steer_correction_factor', 2.0)
+        steer_angle = math.degrees(yaw_error) * steer_gain
+        
+        # ステアリング角度制限（-45°〜+45°）
+        steer_angle = max(-45, min(45, steer_angle))
+
+        motor.accel(target_speed)
+        motor.steer(steer_angle)
+        
+        # Waypoint到達判定用の距離計算
+        dx_check = wp_x - current_x
+        dy_check = wp_y - current_y
+        distance_to_wp = math.hypot(dx_check, dy_check)
+        
+        # デバッグ情報表示（コンパクト版）
+        if DEBUG_MODE:
+            print(f"[DEBUG] WP:{idx}/{n_wp-1} Tgt:({wp_x:.1f},{wp_y:.1f},{math.degrees(target_yaw_rad):.0f}°) Cur:({current_x:.1f},{current_y:.1f},{math.degrees(current_yaw):.0f}°) Ctrl:(A={target_speed:.0f},S={steer_angle:.0f}°) Err:(Y={math.degrees(yaw_error):.0f}°,D={distance_to_wp:.2f}m)")
+
+        # Waypoint到達判定
+        if distance_to_wp < 0.5:  # 50cm以内で到達判定
+            idx += 1
+            # 周回数更新
+            if idx % len(waypoints) == 0:
+                lap += 1
+
+        # 状態送信
+        status_queue.put({'wp_idx': idx, 'FR':FR, 'LH':LH, 'RH':RH, 'RLH':RLH, 'RRH':RRH, 'speed':motor.speed, 'steer':motor.steer_angle})
+        time.sleep(LOOP_DELAY)
+
+    motor.accel(0)
+    motor.steer(0)
+    print("Waypoint traversal complete")
+    status_queue.put({'event':'complete'})
+
+# ---- スタート・ストップ・復帰コマンド ----
+def start():
+    print("Start command received")
+    pause_flag.clear()
+    running_flag.set()
+
+def stop():
+    print("Stop command received")
+    pause_flag.set()
+    motor.accel(0)
+    motor.steer(0)
+
+def resume():
+    print("Resume command received")
+    pause_flag.clear()
+
+# ---- メイン ----
+if __name__ == '__main__':
+    wifi_was_disabled = False
+    
+    try:
+        # WiFi無効化オプションが指定されている場合
+        if args.disable_wifi and platform_info['is_raspberry_pi']:
+            print("\n" + "="*60)
+            print("WiFi Disable Mode - Maximum Hardware Stability")
+            print("="*60)
+            print("WARNING: Remote monitoring/control will be unavailable")
+            print("Press Ctrl+C to cancel, or wait 5 seconds to continue...")
+            print("="*60)
+            try:
+                time.sleep(5)
+                if manage_wifi(enable=False):
+                    wifi_was_disabled = True
+                    print("[OK] WiFi disabled - System resources optimized")
+                else:
+                    print("[WARN] WiFi disable failed - Continuing with WiFi enabled")
+            except KeyboardInterrupt:
+                print("\nWiFi disable cancelled by user")
+                sys.exit(0)
+        
+        # メイン制御スレッド起動
+        threading.Thread(target=waypoint_control_loop, daemon=True).start()
+        print("Press Enter to START")
+        input()
+        start()
+
         try:
-            # ① 走行モード選択
-            if not self.select_driving_mode():
-                print("🛑 System startup cancelled.")
-                return
-            
-            # ② IMUキャリブレーション
-            print(f"\n🎯 Ready for IMU calibration...")
-            if not self.run_imu_calibration():
-                print("❌ Calibration required for racing.")
-                return
-            
-            # ③ システム状態確認
-            if not self.system_status_check():
-                print("❌ System setup incomplete.")
-                return
-            
-            # ④ レース開始待機
-            if not self.wait_for_race_start():
-                print("🛑 Race cancelled.")
-                return
-            
-            # ⑤ レース実行
-            self.run_race()
-            
-        except Exception as e:
-            print(f"\n❌ System Error: {e}")
+            while True:
+                # 状態モニタ表示（メインループと同期）
+                while not status_queue.empty():
+                    s = status_queue.get()
+                    print(f"WP:{s.get('wp_idx', '-')} FR:{s.get('FR', 0):.1f} LH:{s.get('LH', 0):.1f} RH:{s.get('RH', 0):.1f} Spd:{s.get('speed', 0)} St:{s.get('steer', 0):.1f}")
+                time.sleep(0.05)  # 50ms（メインループと同期して1回ずつ表示）
+
+        except KeyboardInterrupt:
+            print("\nEmergency stop")
+            motor.accel(0)
+            motor.steer(0)
+    
+    finally:
+        # 終了処理：WiFi復旧
+        if wifi_was_disabled:
+            print("\n[WiFi] Restoring WiFi connection...")
+            if manage_wifi(enable=True):
+                print("[OK] WiFi restored")
+            else:
+                print("[WARN] WiFi restore failed - may need manual recovery: sudo rfkill unblock wifi && sudo ifconfig wlan0 up")
         
-        finally:
-            print("\n📴 Main Control System shutdown.")
-
-def main():
-    """メイン実行関数"""
-    system = MainControlSystem()
-    system.main_loop()
-
-if __name__ == "__main__":
-    main()
+        # 超音波センサー停止
+        if 'ultra_array' in globals() and ultra_array is not None:
+            try:
+                ultra_array.stop()
+                print("[OK] Ultrasonic sensors stopped")
+            except:
+                pass
+        
+        print("Program terminated")

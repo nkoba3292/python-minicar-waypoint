@@ -1,4 +1,7 @@
 # imu_debug_simple.py
+
+# --- SimpleVersion管理 ---
+SIMPLE_VERSION = 1  # 修正のたびに+1する
 # -*- coding: utf-8 -*-
 """
 BNO055 IMU デバッグ用簡易版（WindowsでもテストOK）
@@ -16,7 +19,7 @@ import random
 import math
 
 # Windows環境での動作確認用のモックセンサーモード
-MOCK_MODE = True  # Trueにすると模擬データで動作
+MOCK_MODE = False  # Trueにすると模擬データで動作
 
 try:
     import serial
@@ -106,6 +109,51 @@ class MockBNO055:
         print("🔌 Mock BNO055 disconnected")
 
 class BNO055Sensor:
+    def connect(self):
+        if MOCK_MODE:
+            self.mock_sensor = MockBNO055()
+            self.is_connected = self.mock_sensor.connect()
+            return self.is_connected
+        try:
+            if not SERIAL_AVAILABLE:
+                print("⚠️ pyserial not available. Cannot connect real sensor.")
+                return False
+            import serial
+            self.serial_conn = serial.Serial(
+                self.port,
+                self.baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=0.1
+            )
+            print(f"[DEBUG] serial.Serial config: {self.serial_conn}")
+            self.is_connected = True
+            print(f"🔌 BNO055 connected on {self.port} at {self.baudrate}bps")
+
+            # --- BNO055初期化: 動作モード設定（NDOF） ---
+            # 動作モード設定: 0x3Dレジスタに0x0C（NDOF）を書き込む
+            try:
+                # CONFIGモードへ
+                self.serial_conn.write(bytes([0xAA, 0x00, 0x3D, 0x00]))
+                time.sleep(0.05)
+                resp1 = self.serial_conn.read(2)
+                print(f"[DEBUG] CONFIG mode set resp: {list(resp1)}")
+                # NDOFモードへ
+                self.serial_conn.write(bytes([0xAA, 0x00, 0x3D, 0x0C]))
+                time.sleep(0.05)
+                resp2 = self.serial_conn.read(2)
+                print(f"[DEBUG] NDOF mode set resp: {list(resp2)}")
+                time.sleep(0.5)  # モード切替後の安定待機
+                print("✅ BNO055 mode set to NDOF (waited 0.5s)")
+            except Exception as e:
+                print(f"⚠️ BNO055 mode set error: {e}")
+
+            return True
+        except Exception as e:
+            print(f"❌ BNO055 connect error: {e}")
+            self.is_connected = False
+            return False
     """実際のBNO055センサー制御クラス（簡易版）"""
     
     def __init__(self, port='/dev/serial0', baudrate=115200):
@@ -113,57 +161,136 @@ class BNO055Sensor:
         self.baudrate = baudrate
         self.serial_conn = None
         self.is_connected = False
-        self.sensor_data = {}
-        
-        if MOCK_MODE:
-            print("🔧 Running in MOCK mode (no real sensor)")
-            self.mock_sensor = MockBNO055()
-        
-    def connect(self):
-        if MOCK_MODE:
-            return self.mock_sensor.connect()
-        
-        if not SERIAL_AVAILABLE:
-            print("❌ pyserial not available")
-            return False
-        
-        try:
-            print(f"🔌 Connecting to BNO055 on {self.port}...")
-            self.serial_conn = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                timeout=1.0
-            )
-            time.sleep(2)
-            
-            # 簡易接続確認（実際のチップID確認等は省略）
-            self.is_connected = True
-            print("✅ BNO055 connected successfully")
-            return self.initialize_sensor()
-            
-        except Exception as e:
-            print(f"❌ Connection failed: {e}")
-            return False
-    
-    def initialize_sensor(self):
-        if MOCK_MODE:
-            return self.mock_sensor.initialize_sensor()
-        
-        print("✅ BNO055 initialization completed")
-        return True
-    
+
     def update_sensor_data(self):
         if MOCK_MODE:
             return self.mock_sensor.update_sensor_data()
-        
-        # 実際のセンサーからデータ読み取り（簡素化版）
-        # 実装は元のコードを参照
-        return True
+        try:
+            import struct
+            # BNO055のレジスタアドレス
+            ACC_ADDR = 0x08  # 加速度
+            GYR_ADDR = 0x14  # ジャイロ
+            MAG_ADDR = 0x0E  # 地磁気
+            EUL_ADDR = 0x1A  # オイラー角
+            CALIB_ADDR = 0x35  # キャリブレーション
+            TEMP_ADDR = 0x34  # 温度
+            SYS_STATUS_ADDR = 0x39
+            SYS_ERR_ADDR = 0x3A
+            CHIP_ID_ADDR = 0x00
+
+            def read_vector(addr, length):
+                # BNO055のレジスタからlengthバイト読む
+                cmd = bytes([0xAA, 0x01, addr, length])
+                self.serial_conn.write(cmd)
+                time.sleep(0.01)
+                resp = self.serial_conn.read(2 + length)
+                print(f"[DEBUG] read_vector addr=0x{addr:02X} cmd={list(cmd)} resp={list(resp)} hex={resp.hex()}")
+                if len(resp) == 0:
+                    print(f"[DEBUG] No response from BNO055")
+                    return None
+                if resp[0] == 0xEE:
+                    print(f"[DEBUG] BNO055 error response: code=0x{resp[1]:02X}")
+                    return None
+                if len(resp) != 2 + length or resp[0] != 0xBB:
+                    print(f"[DEBUG] Unexpected response format: {list(resp)}")
+                    return None
+                return resp[2:]
+
+            # --- ステータス・エラー・IDレジスタの取得 ---
+            chip_id = read_vector(CHIP_ID_ADDR, 1)
+            print(f"[DEBUG] CHIP_ID: {chip_id}")
+            sys_status = read_vector(SYS_STATUS_ADDR, 1)
+            print(f"[DEBUG] SYS_STATUS: {sys_status}")
+            sys_err = read_vector(SYS_ERR_ADDR, 1)
+            print(f"[DEBUG] SYS_ERR: {sys_err}")
+
+            # --- キャリブレーション状態の取得・表示 ---
+            calib_raw = read_vector(CALIB_ADDR, 1)
+            if calib_raw:
+                calib_byte = calib_raw[0]
+                calib = {
+                    'system':   (calib_byte >> 6) & 0x03,
+                    'gyroscope':(calib_byte >> 4) & 0x03,
+                    'accelerometer':(calib_byte >> 2) & 0x03,
+                    'magnetometer': calib_byte & 0x03
+                }
+                print(f"[DEBUG] CALIBRATION: raw=0x{calib_byte:02X} sys={calib['system']} gyro={calib['gyroscope']} acc={calib['accelerometer']} mag={calib['magnetometer']}")
+            else:
+                print("[DEBUG] CALIBRATION: read failed")
+
+            # 加速度
+            acc_raw = read_vector(ACC_ADDR, 6)
+            if acc_raw:
+                acc = struct.unpack('<hhh', acc_raw)
+                acc = tuple([v/100.0 for v in acc])
+            else:
+                acc = (0.0, 0.0, 0.0)
+            # ジャイロ
+            gyr_raw = read_vector(GYR_ADDR, 6)
+            if gyr_raw:
+                gyr = struct.unpack('<hhh', gyr_raw)
+                gyr = tuple([v/16.0 for v in gyr])
+            else:
+                gyr = (0.0, 0.0, 0.0)
+            # 地磁気
+            mag_raw = read_vector(MAG_ADDR, 6)
+            if mag_raw:
+                mag = struct.unpack('<hhh', mag_raw)
+                mag = tuple([v/16.0 for v in mag])
+            else:
+                mag = (0.0, 0.0, 0.0)
+            # オイラー角
+            eul_raw = read_vector(EUL_ADDR, 6)
+            if eul_raw:
+                eul = struct.unpack('<hhh', eul_raw)
+                eul = tuple([v/16.0 for v in eul])
+            else:
+                eul = (0.0, 0.0, 0.0)
+            # キャリブレーション
+            calib_raw = read_vector(CALIB_ADDR, 1)
+            if calib_raw:
+                calib_byte = calib_raw[0]
+                calib = {
+                    'system':   (calib_byte >> 6) & 0x03,
+                    'gyroscope':(calib_byte >> 4) & 0x03,
+                    'accelerometer':(calib_byte >> 2) & 0x03,
+                    'magnetometer': calib_byte & 0x03
+                }
+            else:
+                calib = {'system':0, 'gyroscope':0, 'accelerometer':0, 'magnetometer':0}
+            # 温度
+            temp_raw = read_vector(TEMP_ADDR, 1)
+            if temp_raw:
+                temp = int.from_bytes(temp_raw, 'little')
+            else:
+                temp = 25.0
+
+            self.sensor_data = {
+                'timestamp': time.time(),
+                'raw': {
+                    'accelerometer': {'x': acc[0], 'y': acc[1], 'z': acc[2]},
+                    'gyroscope': {'x': gyr[0], 'y': gyr[1], 'z': gyr[2]},
+                    'magnetometer': {'x': mag[0], 'y': mag[1], 'z': mag[2]}
+                },
+                'fusion': {
+                    'euler': {'roll': eul[0], 'pitch': eul[1], 'yaw': eul[2]},
+                    'quaternion': {'w': 1.0, 'x': 0.0, 'y': 0.0, 'z': 0.0},
+                    'linear_acceleration': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                    'gravity': {'x': 0.0, 'y': 0.0, 'z': 9.8}
+                },
+                'calibration': calib,
+                'temperature': temp
+            }
+            print(f"[DEBUG] update_sensor_data: {self.sensor_data}")
+            return True
+        except Exception as e:
+            print(f"[DEBUG] update_sensor_data error: {e}")
+            return False
     
     def get_sensor_data(self):
         if MOCK_MODE:
             return self.mock_sensor.get_sensor_data()
-        
+        print(f"[DEBUG] get_sensor_data: {self.sensor_data}")
         return self.sensor_data.copy()
     
     def disconnect(self):
@@ -319,24 +446,29 @@ class SimpleIMUMonitor:
         self.running = True
         self.start_time = time.time()
         self.data_count = 0
-        
+        # --- 初期化直後にディレイ追加 ---
+        time.sleep(1)
         try:
             while self.running:
-                # センサーデータ更新
-                if self.sensor.update_sensor_data():
-                    data = self.sensor.get_sensor_data()
-                    
-                    # 表示
-                    if self.display_mode == 'compact':
-                        self.display_compact(data)
-                    else:
-                        self.display_detailed(data)
-                        time.sleep(1)  # 詳細モードは少し長く表示
-                    
-                    # ログ記録
-                    if self.log_enabled:
-                        self.log_data(data)
-                
+                try:
+                    # センサーデータ更新
+                    if self.sensor.update_sensor_data():
+                        data = self.sensor.get_sensor_data()
+                        print(f"\n[DEBUG] sensor_data: {data}")  # データ内容を可視化
+                        # 表示
+                        if self.display_mode == 'compact':
+                            self.display_compact(data)
+                        else:
+                            self.display_detailed(data)
+                            time.sleep(1)  # 詳細モードは少し長く表示
+                        # ログ記録
+                        if self.log_enabled:
+                            self.log_data(data)
+                except Exception as e:
+                    print(f"\n❌ Monitoring error (data acquisition): {e}")
+                    # 必要ならここで再接続やリトライ処理も可
+                    self.running = False
+                    break
                 # Windows対応のキー入力チェック
                 if os.name == 'nt':  # Windows
                     import msvcrt
@@ -346,9 +478,7 @@ class SimpleIMUMonitor:
                 else:  # Linux
                     # 非ブロッキング入力（実装省略）
                     pass
-                
                 time.sleep(0.1)  # 10Hz更新
-                
         except KeyboardInterrupt:
             print("\n🛑 Monitoring stopped by user")
         except Exception as e:
@@ -378,7 +508,8 @@ class SimpleIMUMonitor:
 
 def main():
     """メイン実行関数"""
-    print("🧭 BNO055 IMU Sensor Debug Tool (Simple Version)")
+    global SIMPLE_VERSION
+    print(f"🧭 BNO055 IMU Sensor Debug Tool (Simple Version)  [simpleversion={SIMPLE_VERSION}]")
     print("="*55)
     
     if MOCK_MODE:
@@ -408,4 +539,5 @@ def main():
         print("💤 IMU debug session ended")
 
 if __name__ == "__main__":
+    SIMPLE_VERSION += 1
     main()

@@ -43,7 +43,7 @@ DATA_PINS = [D0_PIN, D1_PIN, D2_PIN]  # LSB first, only 3 bits connected
 
 
 class Counter74HC590:
-    def __init__(self, latch_pin, data_pins, clear_pin, debounce_time=0.2):
+    def __init__(self, latch_pin, data_pins, clear_pin, debounce_time=0.03, min_pulse_interval=0.02):
         """
         Initialize 74HC590 counter reader
         

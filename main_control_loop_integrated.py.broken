@@ -1,0 +1,260 @@
+﻿# -*- coding: utf-8 -*-
+"""
+Main Control Loop - Integrated IMU Calibration & Race Execution
+Safe sensor display thread implementation
+"""
+
+import sys
+import time
+import threading
+import json
+import os
+from datetime import datetime
+
+
+class RaceMonitor:
+def __init__(self):
+self.race_data = {}
+
+def update_waypoint_data(self, *args, **kwargs):
+pass
+
+def update_imu_data(self, *args, **kwargs):
+pass
+
+def display_monitor_line(self, *args, **kwargs):
+pass
+
+
+class MainControlSystem:
+DRIVING_MODES = {
+1: {'name': 'Qualifying Run', 'file': 'waypoints_qualifying.json'},
+2: {'name': 'Final Run', 'file': 'waypoints_final.json'}
+}
+
+def __init__(self):
+self.ppr = None
+self.imu_offset = 0.0
+self.monitor = RaceMonitor()
+self.system_ready = False
+self.selected_mode = None
+self.waypoints = []
+self.calibration_data = None
+self.calibration_completed = False
+self.imu_display_active = False
+
+def display_startup_banner(self):
+print("\n" + "="*80)
+print("   AUTONOMOUS RACING SYSTEM - Main Control".center(80))
+print("="*80)
+print("   Version: 2.0")
+print("   Date:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+print("="*80 + "\n")
+
+def select_driving_mode(self):
+print("\n DRIVING MODE SELECTION")
+print("="*50)
+for mode_id, mode_info in self.DRIVING_MODES.items():
+print(f"   {mode_id}. {mode_info['name']}")
+try:
+choice = input("\nSelect mode (1-2): ").strip()
+mode_id = int(choice)
+if mode_id not in self.DRIVING_MODES:
+print("❌ Invalid mode")
+return False
+self.selected_mode = mode_id
+waypoint_file = self.DRIVING_MODES[mode_id]['file']
+if os.path.exists(waypoint_file):
+with open(waypoint_file, 'r', encoding='utf-8') as f:
+self.waypoints = json.load(f)
+print(f" Loaded {len(self.waypoints)} waypoints")
+else:
+print(f" Waypoint file not found")
+return False
+return True
+except (ValueError, KeyboardInterrupt):
+return False
+
+def run_imu_calibration(self):
+print("\n IMU CALIBRATION")
+print("="*50)
+calib_file = 'imu_2point_calib.json'
+if os.path.exists(calib_file):
+try:
+with open(calib_file, 'r', encoding='utf-8') as f:
+self.calibration_data = json.load(f)
+self.imu_offset = self.calibration_data.get('imu_yaw_offset', 0.0)
+print(f" Calibration data loaded")
+print(f"    IMU Yaw Offset: {self.imu_offset:.2f}")
+self.calibration_completed = True
+return True
+except Exception as e:
+print(f" Calibration read error: {e}")
+print(f" Calibration file not found")
+return False
+
+def initialize_hardware(self):
+print("\n HARDWARE INITIALIZATION")
+print("="*50)
+try:
+import pure_pursuit_runner_refactored as ppr
+self.ppr = ppr
+print(" Initializing...")
+if not ppr.initialize_hardware():
+print(" Hardware init failed")
+return False
+print(" GPIO initialized")
+print(" Sensors initialized")
+if ppr.imu_sensor is not None:
+print(" IMU initialized")
+return True
+except ImportError as e:
+print(f" Import error: {e}")
+return False
+except Exception as e:
+print(f"❌ Init error: {e}")
+return False
+
+def system_status_check(self):
+print("\n SYSTEM STATUS CHECK")
+print("="*50)
+self.system_ready = (
+self.selected_mode is not None and 
+len(self.waypoints) > 0 and 
+self.calibration_completed
+)
+status_text = "READY" if self.system_ready else "INCOMPLETE"
+print(f"\n{'' if self.system_ready else ''} Status: {status_text}")
+return self.system_ready
+
+def _sensor_block_loop(self, stop_event, first_draw):
+"""SAFE sensor display loop - uses getattr to avoid AttributeError"""
+while not stop_event.is_set():
+try:
+ppr = getattr(self, 'ppr', None)
+imu_offset = getattr(self, 'imu_offset', 0.0)
+current_yaw = None
+if ppr is not None and getattr(ppr, 'imu_sensor', None) is not None:
+try:
+imu_data = ppr.imu_sensor.get_all()
+raw_yaw = imu_data.get('yaw', None)
+if raw_yaw is not None:
+current_yaw = raw_yaw + imu_offset
+except Exception:
+pass
+pos_str = "(no odom)"
+if ppr is not None and hasattr(ppr, 'x') and hasattr(ppr, 'y'):
+pos_str = f"X={ppr.x:.3f}m, Y={ppr.y:.3f}m"
+FR = LH = RH = RLH = RRH = float('nan')
+if ppr is not None and callable(getattr(ppr, 'get_ultrasonic_distances', None)):
+try:
+d = ppr.get_ultrasonic_distances()
+FR = d.get('FR', float('nan'))
+LH = d.get('LH', float('nan'))
+RH = d.get('RH', float('nan'))
+RLH = d.get('RLH', float('nan'))
+RRH = d.get('RRH', float('nan'))
+except Exception:
+pass
+lines = []
+lines.append(f"    IMU: {current_yaw:.2f}" if current_yaw else "    IMU: (n/a)")
+lines.append(f"    Pos: {pos_str}")
+lines.append(f"   FR: {FR:.2f} cm")
+lines.append(f"   LH: {LH:.2f} cm")
+lines.append(f"   RH: {RH:.2f} cm")
+if not first_draw['done']:
+for line in lines:
+print(line)
+first_draw['done'] = True
+else:
+n = len(lines)
+sys.stdout.write(f"\x1b[{n}A")
+for line in lines:
+sys.stdout.write('\r' + line + '\n')
+sys.stdout.flush()
+time.sleep(0.2)
+except Exception:
+time.sleep(0.5)
+
+def wait_for_race_start(self):
+if not self.system_ready:
+print("❌ Not ready")
+return False
+print("\n RACE START PREPARATION")
+print("="*50)
+print("\n SENSOR STATUS:")
+stop_event = threading.Event()
+first_draw = {'done': False}
+sensor_thread = threading.Thread(
+target=self._sensor_block_loop, 
+args=(stop_event, first_draw), 
+daemon=True
+)
+sensor_thread.start()
+try:
+input("\nPress Enter to START...")
+finally:
+stop_event.set()
+sensor_thread.join(timeout=1.0)
+print("\n Race started")
+return True
+
+def display_imu_data_20hz(self):
+self.imu_display_active = True
+def imu_loop():
+last_time = time.time()
+while self.imu_display_active:
+try:
+ppr = getattr(self, 'ppr', None)
+if ppr and hasattr(ppr, 'imu_sensor') and ppr.imu_sensor:
+imu_data = ppr.imu_sensor.get_essential()
+yaw = (imu_data.get('yaw', 0) + self.imu_offset) % 360
+dt = time.time() - last_time
+hz = 1.0 / dt if dt > 0 else 0
+print(f"\r[IMU] YAW:{yaw:6.1f} | {hz:.1f}Hz", end='', flush=True)
+last_time = time.time()
+time.sleep(0.05)
+except Exception:
+time.sleep(0.1)
+threading.Thread(target=imu_loop, daemon=True).start()
+
+def run_race(self):
+print("\n🏁 RACE STARTED!")
+self.display_imu_data_20hz()
+try:
+for i, wp in enumerate(self.waypoints):
+print(f"\n WP {i+1}/{len(self.waypoints)}")
+result = self.ppr.goto_waypoint(wp, imu_offset=self.imu_offset)
+if result == 'stopped':
+break
+except KeyboardInterrupt:
+print("\n🛑 Stopped")
+self.imu_display_active = False
+
+def main_loop(self):
+self.display_startup_banner()
+try:
+if not self.select_driving_mode():
+return
+if not self.run_imu_calibration():
+return
+if not self.system_status_check():
+return
+if not self.initialize_hardware():
+return
+if not self.wait_for_race_start():
+return
+self.run_race()
+except Exception as e:
+print(f"❌ Error: {e}")
+import traceback
+traceback.print_exc()
+
+
+def main():
+system = MainControlSystem()
+system.main_loop()
+
+
+if __name__ == "__main__":
+main()

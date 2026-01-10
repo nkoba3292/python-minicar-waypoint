@@ -23,8 +23,11 @@ class PCA9685MotorDriver:
             with open(config_file, 'r') as f:
                 config = json.load(f)
             self.pca_config = config.get('pca9685', {})
+        except FileNotFoundError:
+            # config.jsonがない場合はデフォルト値を使用（警告なし）
+            self.pca_config = {}
         except Exception as e:
-            print(f"Config file error: {e}")
+            print(f"[WARN] Config file error: {e}")
             self.pca_config = {}
         
         # 設定値
@@ -94,7 +97,7 @@ class PCA9685MotorDriver:
                 angle = 90 + (self.speed * 0.9)  # 90±90度
                 angle = max(0, min(180, angle))
                 self.motor_servo.angle = angle
-                print(f"[PCA9685 Motor] Speed {self.speed} → Angle {angle:.1f}°")
+                # デバッグ出力削除（高頻度呼び出しのため）
             except Exception as e:
                 print(f"Motor control error: {e}")
         else:
@@ -113,7 +116,7 @@ class PCA9685MotorDriver:
                 angle = 90 + self.steer_angle  # 90±90度
                 angle = max(0, min(180, angle))
                 self.steer_servo.angle = angle
-                print(f"[PCA9685 Steer] Angle {self.steer_angle} → Servo {angle:.1f}°")
+                # デバッグ出力削除（高頻度呼び出しのため）
             except Exception as e:
                 print(f"Steering control error: {e}")
         else:

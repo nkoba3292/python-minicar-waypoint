@@ -386,19 +386,36 @@ class UltimateBNO055Sensor:
         try:
             logger.info("Initializing real BNO055 sensor")
             
-            # BNO055をコンフィグモードに設定 (0x3D = 0x00)
-            if self._write_register(0x3D, 0x00):
-                time.sleep(0.025)
-                
-                # 動作モードをNDOF(Nine Degrees of Freedom)に設定 (0x3D = 0x0C)
-                if self._write_register(0x3D, 0x0C):
-                    time.sleep(0.01)
-                    logger.info("Real BNO055 initialization completed")
-                    return True
-                    
-            logger.error("BNO055 initialization failed")
-            return False
+            # 1. コンフィグモードに設定 (0x3D = 0x00)
+            if not self._write_register(0x3D, 0x00):
+                logger.error("Failed to enter config mode")
+                return False
+            time.sleep(0.025)
             
+            # 2. 電源管理設定 - ノーマルモード (0x3E = 0x00)
+            if not self._write_register(0x3E, 0x00):
+                logger.warning("Power mode setting failed")
+            time.sleep(0.01)
+            
+            # 3. ページ0を選択 (0x07 = 0x00)
+            if not self._write_register(0x07, 0x00):
+                logger.warning("Page selection failed")
+            time.sleep(0.01)
+            
+            # 4. 外部クリスタル使用設定 (0x3F = 0x80)
+            if not self._write_register(0x3F, 0x80):
+                logger.warning("External crystal setting failed")
+            time.sleep(0.01)
+            
+            # 5. IMU動作モードに設定 (NDOFより安定) (0x3D = 0x08)
+            if not self._write_register(0x3D, 0x08):
+                logger.error("Failed to set IMU mode")
+                return False
+            time.sleep(0.02)
+            
+            logger.info("Real BNO055 initialization completed (IMU mode)")
+            return True
+                    
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             return False

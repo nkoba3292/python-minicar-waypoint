@@ -43,7 +43,7 @@ DATA_PINS = [D0_PIN, D1_PIN, D2_PIN]  # LSB first, only 3 bits connected
 
 
 class Counter74HC590:
-    def __init__(self, latch_pin, data_pins, clear_pin, debounce_time=0.03, min_pulse_interval=0.02):
+    def __init__(self, latch_pin, data_pins, clear_pin):
         """
         Initialize 74HC590 counter reader
         
@@ -137,6 +137,11 @@ class Counter74HC590:
         else:
             # Wrapped around: e.g., 7 -> 0 means +1, not -7
             delta = (8 - self.last_value) + current
+        
+        # チャタリング対策: 1ポーリング間隔で複数パルスは異常
+        # delta≥2の場合は1パルスに制限（ホールセンサーのチャタリング）
+        if delta > 1:
+            delta = 1
         
         self.total_count += delta
         self.last_value = current

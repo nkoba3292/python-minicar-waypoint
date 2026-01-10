@@ -37,8 +37,6 @@ WHEEL_CLEAR_PIN = 17   # CCLR (BOARD 11)
 # 車輪パラメータ
 WHEEL_DIAMETER = 0.0557  # 車輪直径 [m] (55.7mm) - 実測周長175mm
 WHEEL_PPR = 2.0  # SK1816ラッチ型: N極+S極で2パルス/回転
-DEBOUNCE_TIME = 0.03  # デバウンス時間 [s] (30ms) - ポーリング周期の1/3以下
-MIN_PULSE_INTERVAL = 0.02  # 最小パルス間隔 [s] (20ms) - これより短い間隔は異常
 
 def main():
     print("=" * 60)
@@ -50,7 +48,7 @@ def main():
     print(f"  CLEAR: BCM {WHEEL_CLEAR_PIN} (BOARD 11)")
     print(f"車輪パラメータ:")
     print(f"  直径: {WHEEL_DIAMETER*1000:.1f}mm, PPR: {WHEEL_PPR}")
-    print(f"  デバウンス: {DEBOUNCE_TIME*1000:.0f}ms, 最小間隔: {MIN_PULSE_INTERVAL*1000:.0f}ms")
+    print(f"  チャタリング対策: delta値を1に制限")
     print("=" * 60)
     print("車輪を手で回転させてカウンタの動作を確認してください。")
     print("Ctrl+Cで終了します。")

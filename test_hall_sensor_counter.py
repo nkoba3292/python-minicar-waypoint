@@ -58,11 +58,9 @@ def main():
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
     
-    # カウンタ初期化（デバウンス時間指定）
+    # カウンタ初期化
     try:
-        wheel_counter = Counter74HC590(WHEEL_LATCH_PIN, WHEEL_DATA_PINS, WHEEL_CLEAR_PIN, 
-                                       debounce_time=DEBOUNCE_TIME,
-                                       min_pulse_interval=MIN_PULSE_INTERVAL)
+        wheel_counter = Counter74HC590(WHEEL_LATCH_PIN, WHEEL_DATA_PINS, WHEEL_CLEAR_PIN)
         print(f"[OK] カウンタ初期化完了 (初期値: {wheel_counter.last_value})")
     except Exception as e:
         print(f"[ERROR] カウンタ初期化失敗: {e}")

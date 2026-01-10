@@ -35,7 +35,7 @@ WHEEL_DATA_PINS = [13, 21, 25]  # D0, D1, D2 (BOARD 33, 40, 22)
 WHEEL_CLEAR_PIN = 17   # CCLR (BOARD 11)
 
 # 車輪パラメータ
-WHEEL_DIAMETER = 0.0474  # 車輪直径 [m] (47.4mm)
+WHEEL_DIAMETER = 0.0557  # 車輪直径 [m] (55.7mm) - 実測周長175mm
 WHEEL_PPR = 2.0  # SK1816ラッチ型: N極+S極で2パルス/回転
 DEBOUNCE_TIME = 0.05  # デバウンス時間 [s] (50ms)
 

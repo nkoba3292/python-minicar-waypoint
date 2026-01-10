@@ -51,16 +51,12 @@ class Counter74HC590:
             latch_pin: BCM pin for LATCH/STRO (rising edge loads outputs)
             data_pins: List of BCM pins for data bits [D0, D1, D2, ...] LSB first
             clear_pin: BCM pin for CCLR (active LOW clears counter)
-            debounce_time: Minimum time (seconds) between valid pulses (default 0.05s = 50ms)
         """
         self.latch_pin = latch_pin
         self.data_pins = data_pins
         self.clear_pin = clear_pin
         self.last_value = 0
         self.total_count = 0
-        self.start_time = time.time()  # 初期化時刻を記録
-        self.debounce_time = debounce_time  # デバウンス時間
-        self.last_pulse_time = 0.0  # 最後の有効パルス時刻
         
         # Setup GPIO - setmode()はメインプログラムで実行済みと想定
         # sensor_placement_testと同じ設定

@@ -59,6 +59,10 @@ class Counter74HC590:
         self.total_count = 0
         self.start_time = time.time()  # 初期化時刻を記録
         
+        # Chattering suppression: velocity-based filter
+        self.last_pulse_time = 0
+        self.MIN_PULSE_INTERVAL = 0.08  # 80ms = max 750rpm (12.5Hz) for PPR=2
+        
         # Setup GPIO - setmode()はメインプログラムで実行済みと想定
         # sensor_placement_testと同じ設定
         GPIO.setwarnings(False)
@@ -139,6 +143,17 @@ class Counter74HC590:
         # delta≥2の場合は1パルスに制限（ホールセンサーのチャタリング）
         if delta > 1:
             delta = 1
+        
+        # Velocity-based chattering filter (hardware RC filter 1ms + software 80ms)
+        # Reject pulses faster than physically possible rotation speed
+        if delta >= 1:
+            now = time.time()
+            if (now - self.last_pulse_time) < self.MIN_PULSE_INTERVAL:
+                # Too fast, likely chattering - ignore this pulse
+                delta = 0
+            else:
+                # Valid pulse - update timestamp
+                self.last_pulse_time = now
         
         self.total_count += delta
         self.last_value = current
